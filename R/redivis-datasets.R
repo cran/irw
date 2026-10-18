@@ -1,0 +1,359 @@
+#' Whether a Redivis client error is worth retrying
+#'
+#' Covers only what the \code{redivis} client does not already retry itself:
+#' it retries 503s (up to 10 times) and resumes partial downloads, but 502/504
+#' and connection-level failures (resets, timeouts, a truncated Arrow read)
+#' reach us as errors. The markers are ported from Python-pkg's
+#' \code{_TRANSIENT_ERROR_MARKERS}, which accumulated from failures actually
+#' seen against Redivis. Quota, auth, not-found and invalid-request errors are
+#' never retried: retrying cannot fix them, and a quota retry spends more quota.
+#'
+#' @param msg Error message text.
+#' @return Logical.
+#' @keywords internal
+#' @noRd
+.irw_is_transient_error <- function(msg) {
+  if (.irw_redivis_error_type(msg) != "other") {
+    return(FALSE)
+  }
+  grepl(
+    paste0(
+      "\\b50[24]\\b|bad gateway|gateway time-?out|timed? ?out|timeout was reached|",
+      "connection reset|connection was reset|broken pipe|empty reply from server|",
+      "recv failure|send failure|closed cleanly|",
+      "expected to be able to read|message body|incomplete read"
+    ),
+    msg,
+    ignore.case = TRUE
+  )
+}
+
+#' Retry a small Redivis read on transient failures
+#'
+#' Retries \code{expr()} with exponential backoff when the error is one
+#' \code{.irw_is_transient_error()} accepts, and rethrows anything else at once.
+#' Use it only for small reads (metadata, tags, biblio, table listings). Do not
+#' wrap \code{irw_fetch()}'s export: a retry there could export a large table
+#' again against the 30-day export cap.
+#'
+#' @param expr A function that executes the API call.
+#' @param attempts Total number of attempts.
+#' @param base_delay Seconds to wait before the first retry; doubles each time.
+#' @return The result of \code{expr()}.
+#' @keywords internal
+#' @noRd
+.retry_with_backoff <- function(expr, attempts = 3L, base_delay = 1) {
+  if (!is.function(expr)) {
+    stop("`.retry_with_backoff()` now expects a function argument, e.g. `.retry_with_backoff(function() expr)`")
+  }
+  for (i in seq_len(attempts)) {
+    result <- tryCatch(expr(), error = function(e) e)
+    if (!inherits(result, "error")) {
+      return(result)
+    }
+    if (i == attempts || !.irw_is_transient_error(conditionMessage(result))) {
+      stop(result)
+    }
+    .irw_sleep(base_delay * 2^(i - 1))
+  }
+}
+
+# Indirection so tests can skip the backoff wait.
+.irw_sleep <- function(seconds) Sys.sleep(seconds)
+
+
+# helper for multiple redivis datasets
+.irw_sources <- c("core", "nom", "sim", "comp")
+
+#' Resolve data source from \code{source} or deprecated \code{nom}/\code{sim}/\code{comp}
+#'
+#' @param source Character. One of \code{"core"}, \code{"nom"}, \code{"sim"}, \code{"comp"}.
+#' @param sim Deprecated. Use \code{source = "sim"} instead.
+#' @param comp Deprecated. Use \code{source = "comp"} instead.
+#' @param nom Deprecated. Use \code{source = "nom"} instead.
+#' @return Single character string from \code{.irw_sources}.
+#' @keywords internal
+#' @noRd
+.irw_resolve_source <- function(source = "core", sim = FALSE, comp = FALSE, nom = FALSE) {
+  if (isTRUE(sim) || isTRUE(comp) || isTRUE(nom)) {
+    warning(
+      "Arguments 'sim', 'comp', and 'nom' are deprecated and will be removed in a future release. ",
+      "Use source = \"sim\", source = \"comp\", or source = \"nom\" instead.",
+      call. = FALSE
+    )
+    if (isTRUE(sim)) source <- "sim"
+    else if (isTRUE(comp)) source <- "comp"
+    else source <- "nom"
+  }
+  match.arg(source, .irw_sources)
+}
+
+#' Clear session caches that depend on live IRW warehouse table listings
+#'
+#' @keywords internal
+#' @noRd
+.irw_clear_live_table_caches <- function() {
+  for (nm in c(
+    "datasource_list",
+    "metadata_tibble",
+    "metadata_version",
+    "biblio_tibble",
+    "biblio_version",
+    "tags_tibble",
+    "tags_version",
+    "nominal_tags_tibble",
+    "nominal_tags_version",
+    "core_live_catalog_fingerprint"
+  )) {
+    if (exists(nm, envir = .irw_env)) {
+      rm(list = nm, envir = .irw_env)
+    }
+  }
+}
+
+#' Invalidate caches when the configured core warehouse list changes
+#'
+#' @keywords internal
+#' @noRd
+.irw_sync_core_warehouse_caches <- function() {
+  fp <- .irw_core_warehouse_fingerprint()
+  if (!exists("core_warehouse_fingerprint", envir = .irw_env) ||
+      !identical(.irw_env$core_warehouse_fingerprint, fp)) {
+    .irw_env$core_warehouse_fingerprint <- fp
+    .irw_clear_live_table_caches()
+  }
+}
+
+#' Fingerprint of core warehouse config plus each warehouse version tag
+#'
+#' Used so metadata filtered to live tables refreshes when a warehouse updates
+#' even if \code{irw_meta} has not changed.
+#'
+#' @keywords internal
+#' @noRd
+.irw_core_live_catalog_fingerprint <- function() {
+  ds_list <- .initialize_datasource(source = "core")
+  tags <- vapply(ds_list, function(ds) {
+    ds$get()
+    tag <- ds$properties$version$tag
+    if (is.null(tag) || length(tag) == 0L) "" else as.character(tag[[1]])
+  }, character(1))
+  paste(.irw_core_warehouse_fingerprint(), paste(tags, collapse = ","), sep = "|")
+}
+
+#' Return datasources in preferred search order (newest shard first)
+#'
+#' Both sharded families -- core warehouses and item text -- resolve
+#' newest-first, so a name present in more than one shard resolves to its most
+#' recent copy. The single-dataset sources have nothing to order.
+#'
+#' @param ds_list List of Redivis dataset objects.
+#' @param source Resolved source name, or \code{"text"} for item text.
+#' @keywords internal
+#' @noRd
+.irw_order_datasources <- function(ds_list, source) {
+  if (source %in% c("core", "text") && length(ds_list) > 1L) {
+    rev(ds_list)
+  } else {
+    ds_list
+  }
+}
+
+#' Open every shard in a spec list, skipping any that are currently unavailable
+#'
+#' A freshly created shard has no released version yet, so opening it with a
+#' read-only token fails. One such shard must not take down every IRW
+#' lookup, so unavailable shards are dropped with a warning. An
+#' authentication failure applies to all of them, so that still stops.
+#'
+#' A shard that is younger than a pinned IRW version is a different case
+#' and is skipped without a warning: it did not exist then, so its absence is
+#' the correct answer rather than a fault.
+#'
+#' Note this returns shards in **config order** (oldest first). Ordering for
+#' search is a separate concern -- see \code{.irw_order_datasources()}. Opening
+#' without ordering yields oldest-first resolution, which is the shadowing bug
+#' exactly backwards, so the two are always used together.
+#'
+#' @param specs List of specs to open.
+#' @param noun What one of these is called, for messages.
+#' @return A non-empty list of Redivis dataset objects, in config order.
+#' @keywords internal
+#' @noRd
+.irw_open_datasources <- function(specs, noun = "warehouse") {
+  opened <- list()
+  failures <- character(0)
+  skipped <- character(0)
+
+  for (spec in specs) {
+    # A warehouse younger than the pinned IRW version is not a failure: it did
+    # not exist then, so a reproduced session should not see it. Skip it here
+    # rather than letting `.irw_open_dataset()` error, which would report an
+    # expected absence as an unavailable datasource.
+    key <- .irw_dataset_key(spec$dataset)
+    if (identical(.irw_pinned_version(key), .irw_absent_version)) {
+      skipped <- c(skipped, key)
+      next
+    }
+    ds <- tryCatch(
+      .irw_open_dataset(spec),
+      error = function(e) {
+        msg <- conditionMessage(e)
+        if (.irw_redivis_error_type(msg) == "auth") {
+          stop(.irw_auth_error_message(), call. = FALSE)
+        }
+        failures <<- c(failures, .irw_sanitize_redivis_error(msg))
+        NULL
+      }
+    )
+    if (!is.null(ds)) {
+      opened <- c(opened, list(ds))
+    }
+  }
+
+  if (length(skipped) > 0L) {
+    message(
+      "Skipping ", length(skipped), " ", noun, "(s) with no release at the ",
+      "pinned IRW version: ", paste(skipped, collapse = ", "), "."
+    )
+  }
+
+  if (length(opened) == 0L) {
+    if (length(failures) == 0L) {
+      stop(
+        "No IRW ", noun, " had a released version at the IRW version pinned by ",
+        "`irw_use_version()`. Use `irw_reset_version()` to return to the ",
+        "current release.",
+        call. = FALSE
+      )
+    }
+    stop(
+      paste(
+        "\nAn error occurred while accessing IRW:",
+        paste(unique(failures), collapse = "; ")
+      ),
+      call. = FALSE
+    )
+  }
+
+  if (length(failures) > 0L) {
+    warning(
+      "Skipping ", length(failures), " unavailable IRW datasource(s): ",
+      paste(unique(failures), collapse = "; "),
+      call. = FALSE
+    )
+  }
+
+  opened
+}
+
+#' Open every core warehouse, skipping any that are currently unavailable
+#'
+#' @return A non-empty list of Redivis dataset objects, in config order.
+#' @keywords internal
+#' @noRd
+.irw_open_core_datasources <- function() {
+  .irw_open_datasources(.irw_datasource_specs$core, noun = "warehouse")
+}
+
+#' Initialize Redivis Datasource(s)
+#'
+#' Returns a list of Redivis dataset objects based on the selected source:
+#' - If \code{source = "sim"}, returns the IRW simulation dataset (\code{irw_simsyn:0btg})
+#' - If \code{source = "comp"}, returns the IRW competition dataset (\code{irw_competitions:cmd7})
+#' - If \code{source = "nom"}, returns the IRW nominal dataset (\code{irw_nominal:614n})
+#' - If \code{source = "core"} (default), returns all main IRW production datasets
+#'
+#' @param source Character. One of \code{"core"}, \code{"nom"}, \code{"sim"}, \code{"comp"}.
+#'   Default is \code{"core"}.
+#' @param sim Deprecated. Use \code{source = "sim"} instead.
+#' @param comp Deprecated. Use \code{source = "comp"} instead.
+#' @param nom Deprecated. Use \code{source = "nom"} instead.
+#'
+#' @return A list of one or more Redivis dataset objects.
+#' @keywords internal
+#' @noRd
+.initialize_datasource <- function(source = "core", sim = FALSE, comp = FALSE, nom = FALSE) {
+  source <- .irw_resolve_source(source = source, sim = sim, comp = comp, nom = nom)
+
+  if (source == "core") {
+    .irw_sync_core_warehouse_caches()
+    if (!exists("datasource_list", envir = .irw_env) || is.null(.irw_env$datasource_list)) {
+      .irw_env$datasource_list <- .irw_open_core_datasources()
+    }
+    return(.irw_env$datasource_list)
+  }
+
+  cache_key <- .irw_single_datasource_cache_key(source)
+  if (!exists(cache_key, envir = .irw_env) || is.null(.irw_env[[cache_key]])) {
+    .irw_env[[cache_key]] <- .irw_open_dataset(.irw_datasource_specs[[source]][[1L]])
+  }
+  list(.irw_env[[cache_key]])
+}
+
+#' Table names currently listed in Redivis for a source
+#'
+#' @param source Character. One of \code{"core"}, \code{"nom"}, \code{"sim"}, \code{"comp"}.
+#' @return Lowercase character vector of unique table names.
+#' @keywords internal
+#' @noRd
+.irw_live_table_names <- function(source = "core") {
+  ds_list <- .irw_order_datasources(.initialize_datasource(source = source), source = source)
+  names_list <- lapply(ds_list, function(ds) {
+    tryCatch(
+      {
+        ds$get()
+        tables <- ds$list_tables()
+        vapply(tables, function(tbl) tbl$name, character(1))
+      },
+      error = function(e) {
+        msg <- conditionMessage(e)
+        err_type <- .irw_redivis_error_type(msg)
+        if (err_type == "auth") {
+          stop(.irw_auth_error_message(), call. = FALSE)
+        }
+        if (err_type != "not_found") {
+          warning(
+            "Could not list tables from one IRW datasource: ",
+            .irw_sanitize_redivis_error(msg),
+            call. = FALSE
+          )
+        }
+        character(0)
+      }
+    )
+  })
+  unique(tolower(unlist(names_list, use.names = FALSE)))
+}
+
+#' Keep metadata/biblio/tags rows whose tables exist in Redivis
+#'
+#' @param df Data frame with a \code{table} column (or \code{table_col}).
+#' @param source Character. IRW data source passed to \code{.initialize_datasource()}.
+#' @param table_col Name of the table-name column.
+#' @keywords internal
+#' @noRd
+.irw_filter_rows_to_live_tables <- function(df, source = "core", table_col = "table") {
+  if (!table_col %in% names(df) || nrow(df) == 0L) {
+    return(df)
+  }
+  live <- .irw_live_table_names(source = source)
+  df[tolower(df[[table_col]]) %in% live, , drop = FALSE]
+}
+
+#' Deduplicate table listing rows, keeping the first row per table name
+#'
+#' Callers should pass rows ordered with preferred warehouse first (newest core warehouse).
+#'
+#' @param tables_info Data frame with a \code{name} column.
+#' @keywords internal
+#' @noRd
+.irw_dedup_table_info <- function(tables_info) {
+  if (!"name" %in% names(tables_info) || nrow(tables_info) == 0L) {
+    return(tables_info)
+  }
+  keep <- !duplicated(tables_info$name)
+  out <- tables_info[keep, , drop = FALSE]
+  rownames(out) <- NULL
+  out
+}

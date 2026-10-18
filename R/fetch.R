@@ -1,0 +1,282 @@
+#' Fetch a Single IRW Table
+#'
+#' Internal helper that fetches a single dataset from IRW, simulation, or competition datasets,
+#' converts it to a tibble, and applies response recoding and optional deduplication.
+#'
+#' @param table_id Character. Name of the table.
+#' @param source Character. One of \code{"core"}, \code{"nom"}, \code{"sim"}, \code{"comp"}.
+#' @param dedup Logical. If TRUE, apply deduplication logic to responses.
+#' @param sim Deprecated. Use \code{source = "sim"} instead.
+#' @param comp Deprecated. Use \code{source = "comp"} instead.
+#' @param nom Deprecated. Use \code{source = "nom"} instead.
+#'
+#' @return A tibble representing the dataset.
+#' @keywords internal
+fetch_single_data <- function(table_id, source = "core", dedup = FALSE, sim = FALSE, comp = FALSE, nom = FALSE) {
+  source <- .irw_resolve_source(source = source, sim = sim, comp = comp, nom = nom)
+  ds_list <- .irw_order_datasources(.initialize_datasource(source = source), source = source)
+  errors <- .irw_new_error_collector()
+
+  for (ds in ds_list) {
+    df <- tryCatch(
+      {
+        withCallingHandlers({
+          ds$get()
+          tbl <- ds$table(table_id)
+          tbl$get()
+          # Not retried: a retry would export the table again against the
+          # 30-day export cap. See .retry_with_backoff(). Served from the disk
+          # cache when this exact table (by content hash) was fetched before.
+          .irw_cached_download(tbl, "tables")
+        },
+        warning = function(w) {
+          if (grepl("No reference id was provided for the table", conditionMessage(w))) {
+            invokeRestart("muffleWarning")
+          }
+        })
+      },
+      error = function(e) {
+        .irw_handle_datasource_error(conditionMessage(e), table_name = table_id, ds_list = ds_list, errors = errors)
+        NULL
+      }
+    )
+
+    if (is.null(df)) next
+
+    # Recode 'resp' from character to numeric if needed (skip for nominal source)
+    if (source != "nom" && "resp" %in% names(df) && is.character(df$resp)) {
+      suppressWarnings({
+        new_resp <- as.numeric(df$resp)
+      })
+      non_numeric_values <- is.na(new_resp) & !(tolower(trimws(df$resp)) %in% c("na", "", NA))
+      if (any(non_numeric_values)) {
+        warning(sprintf(
+          "In dataset '%s': 'resp' column contained non-numeric values that could not be coerced. Some NAs were introduced.",
+          table_id
+        ))
+      }
+      df$resp <- new_resp
+    }
+
+    # Deduplication logic
+    if (dedup) {
+      n_before <- nrow(df)
+
+      if ("date" %in% names(df)) {
+        message(sprintf(
+          "Deduplication skipped for dataset '%s': 'date' column detected (timestamped responses).", table_id
+        ))
+      } else {
+        if ("wave" %in% names(df)) {
+          grouping_keys <- list(df$id, df$item, df$wave)
+          success_msg <- sprintf(
+            "Deduplicated dataset '%s': one response randomly retained per (id, item, wave) group.", table_id
+          )
+        } else {
+          grouping_keys <- list(df$id, df$item)
+          success_msg <- sprintf(
+            "Deduplicated dataset '%s': one response randomly retained per (id, item) pair.", table_id
+          )
+        }
+
+        split_df <- split(df, grouping_keys, drop = TRUE)
+        df <- do.call(rbind, lapply(split_df, function(g) g[sample(nrow(g), 1), , drop = FALSE]))
+        rownames(df) <- NULL
+
+        n_after <- nrow(df)
+        if (n_after < n_before) {
+          message(success_msg)
+        } else {
+          message(sprintf(
+            "Deduplication not needed for dataset '%s': no duplicate responses found.", table_id
+          ))
+        }
+      }
+    }
+
+    return(df)
+  }
+
+  # Only report the table as missing when every datasource actually said
+  # "not found"; anything else (quota, timeout, transport) is re-raised so it is
+  # not mistaken for a table that was removed from IRW.
+  failure <- .irw_collected_error_message(errors)
+  if (!is.null(failure)) {
+    message("Error fetching dataset ", shQuote(table_id), ":", failure)
+    return(invisible(NULL))
+  }
+
+  pinned <- .irw_pinned_not_found_message(table_id, source)
+  if (!is.null(pinned)) {
+    message("Error fetching dataset ", shQuote(table_id), ":", pinned)
+    return(invisible(NULL))
+  }
+
+  message(
+    "Error fetching dataset ",
+    shQuote(table_id),
+    ": table does not exist in IRW."
+  )
+  invisible(NULL)
+}
+
+#' Fetch Table(s) from the Item Response Warehouse
+#'
+#' Retrieves one or more tables from IRW and returns them as tibbles.
+#' This downloads every row of each table and counts against the Redivis export
+#' quota; if you only need the item or response value sets, or per-item counts
+#' and ranges, use [irw_table_sets()], which answers with a server-side query.
+#' If the table includes a character `resp` column, the function attempts to
+#' coerce it into numeric. Strings like `"NA"`, `""`, and `NA` are treated as missing values.
+#' A warning is issued only if other non-numeric values are encountered.
+#'
+#' Each table downloaded is also kept on disk (see [irw_cache_dir()]) and reused
+#' by later fetches, in this session or another, for as long as the table is
+#' unchanged on Redivis; the Python package shares the same copies. Switch this
+#' off with `options(irw.cache = FALSE)` or `IRW_CACHE=0`.
+#'
+#' A table the IRW found through another collection, such as openESM, prints
+#' that collection's note and citation once per session per collection.
+#' Silence it with `options(irw.source_note = FALSE)` or `IRW_SOURCE_NOTE=0`.
+#'
+#' @param name Character vector of one or more table names (IRW table IDs).
+#' @param source Character. Data source: \code{"core"} (default), \code{"nom"}, \code{"sim"}, or \code{"comp"}.
+#' @param sim Deprecated. Use \code{source = "sim"} instead.
+#' @param dedup Logical, optional. If TRUE, deduplicates responses based on timing variables. Defaults to FALSE.
+#'   If a \code{date} column is present, no deduplication is performed.
+#'   If only a \code{wave} column is present, one random response is retained per (id, item) group within each wave.
+#'   If neither \code{date} nor \code{wave} is present, one random response is retained per (id, item) pair.
+#' @param comp Deprecated. Use \code{source = "comp"} instead.
+#' @param nom Deprecated. Use \code{source = "nom"} instead.
+#' @param resp Logical, optional. If TRUE, returns response matrix via \code{irw_long2resp()}. Defaults to FALSE.
+#'
+#' @return If a single name is provided, returns a tibble. If multiple, returns a named list
+#'         of tibbles (or error messages, if retrieval failed).
+#'
+#' @seealso [irw_table_sets()] for value sets and summaries without a download;
+#'   [irw_cache_info()] for the tables kept on disk.
+#'
+#' @examplesIf irw_has_credentials()
+#' \donttest{
+#' # Main IRW data
+#' irw_fetch("environment_ltm")
+#'
+#' # Deduplicated
+#' irw_fetch("pks_probability", dedup = TRUE)
+#'
+#' # Simulation data
+#' irw_fetch("gilbert_meta_3", source = "sim")
+#'
+#' # Competition data
+#' irw_fetch("collegefb_2021and2022", source = "comp")
+#' }
+#'
+#' @export
+irw_fetch <- function(name, source = "core", dedup = FALSE, sim = FALSE, comp = FALSE, nom = FALSE, resp = FALSE) {
+  if (missing(name)) {
+    stop(
+      "Please provide the IRW table name(s) to fetch.\n",
+      "Tip: Use `irw_list_tables()` to see available tables.",
+      call. = FALSE
+    )
+  }
+
+  source <- .irw_resolve_source(source = source, sim = sim, comp = comp, nom = nom)
+
+  process_one <- function(nm) {
+    dat <- fetch_single_data(nm, source = source, dedup = dedup)
+    # Credit a table found through an intermediary such as openESM (#2421).
+    # Never raises and is silent on any failure.
+    if (!is.null(dat)) .irw_source_note(nm, source)
+    if (resp) {
+      dat <- tryCatch(
+        irw_long2resp(dat),
+        error = function(e) {
+          warning(sprintf("Could not convert '%s' to response matrix: %s", nm, e$message))
+          return(dat)
+        }
+      )
+    }
+    return(dat)
+  }
+  
+  if (length(name) == 1 && is.character(name)) {
+    return(process_one(name))
+  } else {
+    dataset_list <- lapply(name, process_one)
+    names(dataset_list) <- name
+    return(dataset_list)
+  }
+}
+
+#' Retrieve IRW Metadata Table
+#'
+#' Fetches the metadata table from Redivis and returns it as a tibble.
+#' Automatically checks for updates and refreshes only when needed.
+#'
+#' @param source Character. Data source: \code{"core"} (default), \code{"nom"}, \code{"sim"}, or \code{"comp"}.
+#' @param sim Deprecated. Use \code{source = "sim"} instead.
+#' @param comp Deprecated. Use \code{source = "comp"} instead.
+#' @param nom Deprecated. Use \code{source = "nom"} instead.
+#'
+#' @return A tibble containing metadata information.
+#' @export
+irw_metadata <- function(source = "core", sim = FALSE, comp = FALSE, nom = FALSE) {
+  source <- .irw_resolve_source(source = source, sim = sim, comp = comp, nom = nom)
+
+  if (source == "comp") return(.fetch_comps_metadata_table())
+  if (source == "sim")  return(.fetch_simsyn_metadata_table())
+  if (source == "nom")  return(.fetch_nominal_metadata_table())
+  .fetch_metadata_table()
+}
+
+
+
+#' Retrieve IRW Tags Table
+#'
+#' Fetches the tags table from Redivis and returns it as a tibble.
+#' Link to Redivis table: https://redivis.com/datasets/bdxt-4fqe5tyf4/tables/7nkh-6m7wq01yv
+
+#' Automatically checks for updates and refreshes only when needed.
+#'
+#' @param tables Optional. A character vector of table name(s) to filter by.
+#' @param source Character. Data source: \code{"core"} (default) or \code{"nom"}.
+#'   \code{"comp"} and \code{"sim"} have no tags by design and error.
+#'
+#' @return A tibble containing tags information.
+#' @examplesIf irw_has_credentials()
+#' \donttest{
+#' irw_tags()                  # core
+#' irw_tags(source = "nom")    # nominal
+#' }
+#' @export
+irw_tags <- function(tables = NULL, source = "core") {
+  tags <- .irw_tags_for_source(source)
+  
+  if (is.null(tables)) {
+    return(tags)
+  }
+  
+  if (!is.character(tables)) {
+    stop("`tables` must be a character vector.")
+  }
+  
+  out <- tags[tags$table %in% tables, ]
+  
+  invalid <- setdiff(tables, out$table)
+  
+  if (length(invalid) > 0) {
+    warning(
+      sprintf(
+        "Unknown table name(s): %s",
+        paste(invalid, collapse = ", ")
+      ),
+      call. = FALSE
+    )
+  }
+  
+  out
+}
+
+
+

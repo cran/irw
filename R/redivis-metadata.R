@@ -1,0 +1,551 @@
+# 1. dataset management (getting datasets, caching)
+# 2. table fetching (getting specific tables)
+# 3. metadata operations (metadata, biblio, tags, itemtext)
+#
+# Tables here are addressed by NAME -- $table("tags"), never $table("tags:7nkh").
+# A Redivis reference id belongs to one version's table, not to the table's
+# name: the upload replaces a table by deleting and recreating it (uploads
+# append, so that is the only true replace), and the irw_meta v20.0 cut on
+# 2026-09-04 minted a new id for all thirteen tables at once. Every pinned id
+# in this file stopped resolving that morning and irw_collections() failed for
+# every user. The id had survived the v18 -> v19 cut, so the reuse that kept
+# these strings working was luck rather than a contract.
+#
+# Dataset references DO keep their ids (see redivis-config.R): a dataset is
+# not recreated by an upload, and its id is what protects against a rename.
+
+#' Fetch Simulation Metadata Table
+#'
+#' Retrieves the simsyn_metadata table from Redivis user("datapages")$dataset("irw_meta").
+#' Only fetches new data if the dataset version tag has changed.
+#' Rows are filtered to tables that currently exist in the simulation dataset.
+#'
+#' @return A cached or newly fetched tibble containing simulation metadata information.
+#' @keywords internal
+.fetch_simsyn_metadata_table <- function() {
+  dataset <- .irw_open_meta_dataset()
+  latest_version_tag <- dataset$properties$version$tag
+  
+  if (!is.null(latest_version_tag) &&
+      exists("simsyn_metadata_tibble", envir = .irw_env) &&
+      exists("simsyn_metadata_version", envir = .irw_env) &&
+      identical(.irw_env$simsyn_metadata_version, latest_version_tag)) {
+    return(.irw_env$simsyn_metadata_tibble)
+  }
+  
+  table <- dataset$table("simsyn_metadata")
+  metadata_tibble <- table$to_tibble()
+  .irw_env$simsyn_metadata_tibble <- .irw_filter_rows_to_live_tables(metadata_tibble, source = "sim")
+  .irw_env$simsyn_metadata_version <- latest_version_tag
+  
+  .irw_env$simsyn_metadata_tibble
+}
+
+#' Fetch Nominal Metadata Table
+#'
+#' Retrieves the nominal_metadata table from Redivis user("datapages")$dataset("irw_meta").
+#' Only fetches new data if the dataset version tag has changed.
+#' Rows are filtered to tables that currently exist in the nominal dataset.
+#'
+#' @return A cached or newly fetched tibble containing nominal metadata information.
+#' @keywords internal
+.fetch_nominal_metadata_table <- function() {
+  dataset <- .irw_open_meta_dataset()
+  latest_version_tag <- dataset$properties$version$tag
+  
+  if (!is.null(latest_version_tag) &&
+      exists("nominal_metadata_tibble", envir = .irw_env) &&
+      exists("nominal_metadata_version", envir = .irw_env) &&
+      identical(.irw_env$nominal_metadata_version, latest_version_tag)) {
+    return(.irw_env$nominal_metadata_tibble)
+  }
+  
+  table <- dataset$table("nominal_metadata")
+  metadata_tibble <- table$to_tibble()
+  .irw_env$nominal_metadata_tibble <- .irw_filter_rows_to_live_tables(metadata_tibble, source = "nom")
+  .irw_env$nominal_metadata_version <- latest_version_tag
+  
+  .irw_env$nominal_metadata_tibble
+}
+
+#' Fetch Competition Metadata Table
+#'
+#' Retrieves the comps_metadata table from Redivis user("datapages")$dataset("irw_meta").
+#' Only fetches new data if the dataset version tag has changed.
+#' Rows are filtered to tables that currently exist in the competition dataset.
+#'
+#' @return A cached or newly fetched tibble containing competition metadata information.
+#' @keywords internal
+.fetch_comps_metadata_table <- function() {
+  dataset <- .irw_open_meta_dataset()
+  latest_version_tag <- dataset$properties$version$tag
+  
+  if (!is.null(latest_version_tag) &&
+      exists("comps_metadata_tibble", envir = .irw_env) &&
+      exists("comps_metadata_version", envir = .irw_env) &&
+      identical(.irw_env$comps_metadata_version, latest_version_tag)) {
+    return(.irw_env$comps_metadata_tibble)
+  }
+  
+  table <- dataset$table("comps_metadata")
+  metadata_tibble <- table$to_tibble()
+  .irw_env$comps_metadata_tibble <- .irw_filter_rows_to_live_tables(metadata_tibble, source = "comp")
+  .irw_env$comps_metadata_version <- latest_version_tag
+  .irw_env$comps_metadata_tibble
+}
+
+
+#' Fetch Competition Bibliography Table
+#'
+#' Retrieves the comps_biblio table from Redivis user("datapages")$dataset("irw_meta").
+#' Only fetches new data if the dataset version tag has changed.
+#' This version filters out any tables that do not exist in the IRW competitions database.
+#'
+#' @return A tibble containing filtered comps biblio information.
+#' @keywords internal
+.fetch_comps_biblio_table <- function() {
+  dataset <- .irw_open_meta_dataset()
+  latest_version_tag <- dataset$properties$version$tag
+  
+  if (!is.null(latest_version_tag) &&
+      exists("comps_biblio_tibble", envir = .irw_env) &&
+      exists("comps_biblio_version", envir = .irw_env) &&
+      identical(.irw_env$comps_biblio_version, latest_version_tag)) {
+    return(.irw_env$comps_biblio_tibble)
+  }
+  
+  table <- dataset$table("comps_biblio")
+  biblio_tibble <- .retry_with_backoff(function() table$to_tibble())
+  filtered_biblio <- .irw_filter_rows_to_live_tables(biblio_tibble, source = "comp")
+  
+  .irw_env$comps_biblio_version <- latest_version_tag
+  .irw_env$comps_biblio_tibble <- filtered_biblio
+  filtered_biblio
+}
+
+.fetch_simsyn_biblio_table <- function() {
+  dataset <- .irw_open_meta_dataset()
+  latest_version_tag <- dataset$properties$version$tag
+  
+  if (!is.null(latest_version_tag) &&
+      exists("simsyn_biblio_tibble", envir = .irw_env) &&
+      exists("simsyn_biblio_version", envir = .irw_env) &&
+      identical(.irw_env$simsyn_biblio_version, latest_version_tag)) {
+    return(.irw_env$simsyn_biblio_tibble)
+  }
+  
+  table <- dataset$table("simsyn_biblio")
+  biblio_tibble <- table$to_tibble()
+  filtered_biblio <- .irw_filter_rows_to_live_tables(biblio_tibble, source = "sim")
+  
+  .irw_env$simsyn_biblio_version <- latest_version_tag
+  .irw_env$simsyn_biblio_tibble <- filtered_biblio
+  filtered_biblio
+}
+
+.fetch_nominal_biblio_table <- function() {
+  dataset <- .irw_open_meta_dataset()
+  latest_version_tag <- dataset$properties$version$tag
+  
+  if (!is.null(latest_version_tag) &&
+      exists("nominal_biblio_tibble", envir = .irw_env) &&
+      exists("nominal_biblio_version", envir = .irw_env) &&
+      identical(.irw_env$nominal_biblio_version, latest_version_tag)) {
+    return(.irw_env$nominal_biblio_tibble)
+  }
+  
+  table <- dataset$table("nominal_biblio")
+  biblio_tibble <- table$to_tibble()
+  filtered_biblio <- .irw_filter_rows_to_live_tables(biblio_tibble, source = "nom")
+  
+  .irw_env$nominal_biblio_version <- latest_version_tag
+  .irw_env$nominal_biblio_tibble <- filtered_biblio
+  filtered_biblio
+}
+
+
+#' Fetch Metadata Table
+#'
+#' Retrieves the metadata table from Redivis user("datapages")$dataset("irw_meta")$table("metadata").
+#' Only fetches new data if the table version tag has changed.
+#' Rows are filtered to tables that currently exist in the IRW production datasets.
+#'
+#' @return A cached or newly fetched tibble containing metadata information.
+#' @keywords internal
+.fetch_metadata_table <- function() {
+  dataset <- .irw_open_meta_dataset()
+  # Retrieve version tag
+  latest_version_tag <- dataset$properties$version$tag
+  catalog_fp <- .irw_core_live_catalog_fingerprint()
+
+  # If metadata exists in cache and the version tag is the same, return cached tibble
+  if (!is.null(latest_version_tag) &&
+      exists("metadata_tibble", envir = .irw_env) &&
+      exists("metadata_version", envir = .irw_env) &&
+      identical(.irw_env$metadata_version, latest_version_tag) &&
+      exists("core_live_catalog_fingerprint", envir = .irw_env) &&
+      identical(.irw_env$core_live_catalog_fingerprint, catalog_fp)) {
+    return(.irw_env$metadata_tibble) # Return cached metadata tibble
+  }
+  
+  # Fetch new metadata table and convert it to a tibble
+  table <- dataset$table("metadata")
+  
+  metadata_tibble <- .retry_with_backoff(function() {
+    table$to_tibble()
+  })
+  .irw_env$metadata_tibble <- .irw_filter_rows_to_live_tables(metadata_tibble, source = "core")
+  
+  # Store the new version tag
+  .irw_env$metadata_version <- latest_version_tag
+  .irw_env$core_live_catalog_fingerprint <- catalog_fp
+  
+  return(.irw_env$metadata_tibble)
+}
+
+
+#' Fetch Bibliography Metadata Table
+#'
+#' Retrieves the metadata table from Redivis user("datapages")$dataset("irw_meta")$table("biblio").
+#' Only fetches new data if the table version tag has changed.
+#' This version filters out any tables that do not exist in the IRW database.
+#'
+#' @return A tibble containing filtered biblio information, with only the tables that exist in the IRW database.
+#' @keywords internal
+.fetch_biblio_table <- function() {
+  dataset <- .irw_open_meta_dataset()
+  latest_version_tag <- dataset$properties$version$tag
+  catalog_fp <- .irw_core_live_catalog_fingerprint()
+  
+  # Return cached if version unchanged
+  if (!is.null(latest_version_tag) &&
+      exists("biblio_tibble", envir = .irw_env) &&
+      identical(.irw_env$biblio_version, latest_version_tag) &&
+      exists("core_live_catalog_fingerprint", envir = .irw_env) &&
+      identical(.irw_env$core_live_catalog_fingerprint, catalog_fp)) {
+    return(.irw_env$biblio_tibble)
+  }
+  
+  # Fetch fresh biblio table
+  table <- dataset$table("biblio")
+  biblio_tibble <- .retry_with_backoff(function() table$to_tibble())
+  filtered_biblio <- .irw_filter_rows_to_live_tables(biblio_tibble, source = "core")
+  
+  # Cache
+  .irw_env$biblio_version <- latest_version_tag
+  .irw_env$biblio_tibble <- filtered_biblio
+  .irw_env$core_live_catalog_fingerprint <- catalog_fp
+  
+  return(filtered_biblio)
+}
+
+#' Fetch Tags Metadata Table
+#'
+#' Retrieves the tags metadata table from Redivis user("datapages")$dataset("irw_meta")$table("tags").
+#' Only fetches new data if the table version tag has changed.
+#' Filters out any tags referring to tables that do not exist in the IRW database.
+#'
+#' @return A tibble containing filtered tags information.
+#' @keywords internal
+.fetch_tags_table <- function() {
+  dataset <- .irw_open_meta_dataset()
+  latest_version_tag <- dataset$properties$version$tag
+  catalog_fp <- .irw_core_live_catalog_fingerprint()
+  
+  # Return cached if version unchanged
+  if (!is.null(latest_version_tag) &&
+      exists("tags_tibble", envir = .irw_env) &&
+      identical(.irw_env$tags_version, latest_version_tag) &&
+      exists("core_live_catalog_fingerprint", envir = .irw_env) &&
+      identical(.irw_env$core_live_catalog_fingerprint, catalog_fp)) {
+    return(.irw_env$tags_tibble)
+  }
+  
+  # Fetch and clean tags table
+  table <- dataset$table("tags")
+  tags_tibble <- .retry_with_backoff(function() table$to_tibble())
+  
+  tags_tibble <- as.data.frame(tags_tibble)
+  tags_tibble[] <- lapply(tags_tibble, function(col) {
+    if (is.character(col)) col[col == "NA"] <- NA
+    col
+  })
+  tags_tibble <- tibble::as_tibble(tags_tibble)
+  filtered_tags <- .irw_filter_rows_to_live_tables(tags_tibble, source = "core")
+  
+  # Cache
+  .irw_env$tags_version <- latest_version_tag
+  .irw_env$tags_tibble <- filtered_tags
+  .irw_env$core_live_catalog_fingerprint <- catalog_fp
+  
+  return(filtered_tags)
+}
+
+#' Fetch Nominal Tags Table
+#'
+#' Retrieves the nominal_tags table from Redivis
+#' user("datapages")$dataset("irw_meta")$table("nominal_tags").
+#' Only fetches new data if the dataset version tag has changed.
+#' Rows are filtered to tables that currently exist in the nominal dataset.
+#'
+#' Added for issue #1689: the tagging sheet used to be core-only, leaving the
+#' nominal branch with nowhere to record tags. `comp` and `sim` deliberately
+#' have no equivalent -- see inst/developer/tags.md.
+#'
+#' @return A tibble containing filtered nominal tags information.
+#' @keywords internal
+.fetch_nominal_tags_table <- function() {
+  dataset <- .irw_open_meta_dataset()
+  latest_version_tag <- dataset$properties$version$tag
+
+  if (!is.null(latest_version_tag) &&
+      exists("nominal_tags_tibble", envir = .irw_env) &&
+      exists("nominal_tags_version", envir = .irw_env) &&
+      identical(.irw_env$nominal_tags_version, latest_version_tag)) {
+    return(.irw_env$nominal_tags_tibble)
+  }
+
+  table <- dataset$table("nominal_tags")
+  tags_tibble <- .retry_with_backoff(function() table$to_tibble())
+
+  # Tags reach Redivis as literal "NA" strings; coerce as the core fetcher does.
+  tags_tibble <- as.data.frame(tags_tibble)
+  tags_tibble[] <- lapply(tags_tibble, function(col) {
+    if (is.character(col)) col[col == "NA"] <- NA
+    col
+  })
+  tags_tibble <- tibble::as_tibble(tags_tibble)
+
+  .irw_env$nominal_tags_tibble <- .irw_filter_rows_to_live_tables(tags_tibble, source = "nom")
+  .irw_env$nominal_tags_version <- latest_version_tag
+
+  .irw_env$nominal_tags_tibble
+}
+
+##Collections (issue #1633). Two tables, deliberately handled differently:
+##
+##  collections        the registry, one row per collection. Has NO `table`
+##                     column, so it must NOT go through
+##                     .irw_filter_rows_to_live_tables() -- that would error or
+##                     silently empty it.
+##  collection_members long, one row per (table, collection). Live-filtered like
+##                     every other per-table product.
+##
+##Consequence: after live filtering, membership can be smaller than the
+##`n_tables` the registry published. irw_collections() recomputes rather than
+##trusting that column -- see the note there.
+.fetch_collections_table <- function() {
+  dataset <- .irw_open_meta_dataset()
+  latest_version_tag <- dataset$properties$version$tag
+
+  if (!is.null(latest_version_tag) &&
+      exists("collections_tibble", envir = .irw_env) &&
+      identical(.irw_env$collections_version, latest_version_tag)) {
+    return(.irw_env$collections_tibble)
+  }
+
+  table <- dataset$table("collections")
+  out <- .retry_with_backoff(function() table$to_tibble())
+  out <- as.data.frame(out)
+  out[] <- lapply(out, function(col) {
+    if (is.character(col)) col[col == "NA"] <- NA
+    col
+  })
+  if ("n_tables" %in% names(out)) out$n_tables <- suppressWarnings(as.integer(out$n_tables))
+  out <- tibble::as_tibble(out)
+
+  .irw_env$collections_version <- latest_version_tag
+  .irw_env$collections_tibble <- out
+  out
+}
+
+.fetch_collection_members_table <- function() {
+  dataset <- .irw_open_meta_dataset()
+  latest_version_tag <- dataset$properties$version$tag
+  catalog_fp <- .irw_core_live_catalog_fingerprint()
+
+  if (!is.null(latest_version_tag) &&
+      exists("collection_members_tibble", envir = .irw_env) &&
+      identical(.irw_env$collection_members_version, latest_version_tag) &&
+      exists("core_live_catalog_fingerprint", envir = .irw_env) &&
+      identical(.irw_env$core_live_catalog_fingerprint, catalog_fp)) {
+    return(.irw_env$collection_members_tibble)
+  }
+
+  table <- dataset$table("collection_members")
+  out <- .retry_with_backoff(function() table$to_tibble())
+  out <- tibble::as_tibble(as.data.frame(out))
+  filtered <- .irw_filter_rows_to_live_tables(out, source = "core")
+
+  .irw_env$collection_members_version <- latest_version_tag
+  .irw_env$collection_members_tibble <- filtered
+  .irw_env$core_live_catalog_fingerprint <- catalog_fp
+
+  filtered
+}
+
+#' Fetch the tags table for a datasource
+#'
+#' Central dispatch so callers never hardcode which sources have tags.
+#' Errors for \code{comp}/\code{sim}, which have none by design.
+#'
+#' @param source One of \code{"core"} or \code{"nom"}.
+#' @return A tibble of tags for that source.
+#' @keywords internal
+.irw_tags_for_source <- function(source = "core") {
+  switch(source,
+         core = .fetch_tags_table(),
+         nom  = .fetch_nominal_tags_table(),
+         stop("Tags are not available for `source = \"", source,
+              "\"`. Tagged sources: ", paste(.irw_tag_sources, collapse = ", "),
+              ".", call. = FALSE))
+}
+
+
+#' Invalidate item text session caches when the configured shard list changes
+#'
+#' Mirrors \code{.irw_sync_core_warehouse_caches()}. Without this, a session that
+#' gains a shard (a package upgrade, or \code{devtools::load_all()}) would keep
+#' serving the union it had already cached and the new shard would stay
+#' invisible until restart.
+#'
+#' @keywords internal
+#' @noRd
+.irw_sync_itemtext_caches <- function() {
+  fp <- .irw_itemtext_fingerprint()
+  if (!exists("itemtext_fingerprint", envir = .irw_env) ||
+      !identical(.irw_env$itemtext_fingerprint, fp)) {
+    .irw_env$itemtext_fingerprint <- fp
+    for (nm in c("itemtext_datasource_list", "itemtext_table_names",
+                 "itemtext_table_index")) {
+      if (exists(nm, envir = .irw_env)) rm(list = nm, envir = .irw_env)
+    }
+  }
+}
+
+
+#' Access the IRW item text datasources, newest shard first
+#'
+#' Item text is a shard list for the same reason response data is: Redivis caps
+#' a dataset at 1000 tables. The list is stored **already ordered**, so no
+#' caller can forget to reverse it -- oldest-first resolution would return a
+#' stale copy of any table present in more than one shard.
+#'
+#' @return A non-empty list of Redivis dataset objects, newest first.
+#' @keywords internal
+.irw_itemtext_datasources <- function() {
+  .irw_sync_itemtext_caches()
+  if (!exists("itemtext_datasource_list", envir = .irw_env) ||
+      is.null(.irw_env$itemtext_datasource_list)) {
+    .irw_env$itemtext_datasource_list <- .irw_order_datasources(
+      .irw_open_datasources(.irw_itemtext_specs, noun = "item text dataset"),
+      source = "text"
+    )
+  }
+  .irw_env$itemtext_datasource_list
+}
+
+
+#' Map each item text table to the shard that should serve it
+#'
+#' Built in the same listing pass as \code{irw_list_itemtext_tables()}: one
+#' round-trip gives both the union and the routing. Populated newest-first, so
+#' the first writer wins and an older shard never overwrites a newer entry.
+#'
+#' Fetching must go through this rather than through "the" item text dataset.
+#' "Listing found it in shard 2, fetch asked shard 1" is precisely the shadowing
+#' bug that sharding otherwise introduces.
+#'
+#' @return A named list mapping stored base name -> Redivis dataset object.
+#' @keywords internal
+.irw_itemtext_table_index <- function() {
+  .irw_sync_itemtext_caches()
+  if (!exists("itemtext_table_index", envir = .irw_env) ||
+      is.null(.irw_env$itemtext_table_index)) {
+    index <- list()
+    for (ds in .irw_itemtext_datasources()) {
+      nms <- vapply(ds$list_tables(), function(t) t$properties$name, character(1))
+      nms <- sub("__items$", "", nms)
+      for (nm in nms) {
+        if (is.null(index[[nm]])) index[[nm]] <- ds
+      }
+    }
+    .irw_env$itemtext_table_index <- index
+    .irw_env$itemtext_table_names <- sort(names(index))
+  }
+  .irw_env$itemtext_table_index
+}
+
+
+#' Fetch item text table from IRW Redivis dataset 
+#'
+#' Retrieves an item text table from the IRW Redivis text dataset,
+#' given a known base table name. If not available, it returns `NULL` with a message.
+#'
+#' @param table_name Character. The base table name (e.g., "gilbert_meta_49").
+#' @return A tibble with item text metadata or `NULL`.
+#' @keywords internal
+.fetch_itemtext_table <- function(table_name) {
+  available_tables <- irw_list_itemtext_tables()
+
+  # Item text tables are stored on Redivis with names that are lower-cased on
+  # upload, while many IRW response tables have mixed case (e.g. the response
+  # table `HEARD_Roch_2022_K6` has its item text stored as
+  # `heard_roch_2022_k6__items`). Matching only on the exact string made the
+  # item text for those tables unreachable under the name a user would
+  # naturally pass. So: prefer an exact match, then fall back to a
+  # case-insensitive one.
+  resolved <- .resolve_itemtext_table_name(table_name, available_tables)
+
+  if (is.null(resolved)) {
+    message(glue::glue("Item text not available for table: '{table_name}'"))
+    return(NULL)
+  }
+
+  # Route to the shard that actually holds it, never to a remembered "the"
+  # item text dataset.
+  dataset <- .irw_itemtext_table_index()[[resolved]]
+  if (is.null(dataset)) {
+    message(glue::glue("Item text not available for table: '{table_name}'"))
+    return(NULL)
+  }
+  full_name <- paste0(resolved, "__items")
+
+  table <- dataset$table(full_name)
+  # get() loads the table's content hash, which keys the disk cache.
+  suppressWarnings(.retry_with_backoff(function() {
+    table$get()
+    .irw_cached_download(table, "itemtext")
+  }))
+}
+
+# Resolve a user-supplied table name against the available item text tables,
+# tolerating case differences. Returns the stored name, or NULL if there is no
+# match. An ambiguous case-insensitive match (two stored tables differing only
+# in case) is reported rather than silently resolved to one of them.
+.resolve_itemtext_table_name <- function(table_name, available_tables) {
+  if (length(table_name) != 1 || is.na(table_name) || !nzchar(table_name)) {
+    return(NULL)
+  }
+
+  if (table_name %in% available_tables) {
+    return(table_name)
+  }
+
+  matches <- available_tables[tolower(available_tables) == tolower(table_name)]
+
+  if (length(matches) == 0) {
+    return(NULL)
+  }
+
+  if (length(matches) > 1) {
+    message(glue::glue(
+      "Multiple item text tables match '{table_name}' case-insensitively: ",
+      "{paste(matches, collapse = ', ')}. Please pass one of these exactly."
+    ))
+    return(NULL)
+  }
+
+  matches
+}
+

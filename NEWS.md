@@ -1,0 +1,97 @@
+# irw 1.3.1
+
+Changes asked for in CRAN's review of the first submission:
+
+- **Breaking:** irw_download() and irw_save_bibtex() no longer have a default output path; name the file with `path` / `output_file`. Nothing is written to the working directory by default.
+- The table cache now defaults to `tools::R_user_dir("irw", "cache")` (e.g. `~/.cache/R/irw`) instead of `~/.cache/irw`, per CRAN policy. Tables cached by 1.3.0 are fetched again once. The Python package still defaults to `~/.cache/irw`; set `IRW_CACHE_DIR` for both to share one cache.
+- Examples: the ones that need no network run as-is; the ones that query Redivis are in `\donttest{}` instead of `\dontrun{}`.
+- `gnm` and `BradleyTerry2` added to Suggests (used by the irw_simdata_comp() example).
+- Reading the warehouse needs a Redivis login (the README's 1.3.0-era "login optional" section was wrong and is reverted). Outside an interactive session, functions that read the warehouse now stop at once with instructions when no login is cached, instead of starting a browser login that waits forever. New irw_has_credentials() reports whether a login is available; the warehouse examples run only when it is TRUE.
+- irw_simdata() and irw_simdata_comp(): `seed` no longer changes the caller's random number stream; it is restored on exit.
+
+- irw_covariate_labels() and irw_covariates(labels = TRUE): the source's value labels for coded covariates, from irw_meta's new `covariate_labels` table; opt-in, irw_fetch() unchanged (ben-domingue/irw#1775)
+- Docs: the exact-instrument collections (`phq9`, `gad7`, ...) and what their `basis` values mean, in `irw_collection_members()` and `irw_collections()` (ben-domingue/irw#1712)
+- irw_fetch(): once-per-session credit note for tables found via openESM and similar collections (ben-domingue/irw#2421)
+- irw_save_bibtex(): also returns the openESM citation for tables found via openESM (ben-domingue/irw#2421)
+
+# irw 1.3.0
+
+- On-disk table cache, shared with the Python package (#170)
+
+# irw 1.2.2
+
+- .retry_with_backoff(): retry transient failures on small reads (#167)
+
+# irw 1.2.1
+
+- irw_filter(): skip the density default for sources without a density column (#165)
+- irw_table_sets(): per_item is NULL when the table has no resp column (#164)
+- irw_imv(): call imv::imv.binary() instead of a private copy (#163)
+
+# irw 1.2.0
+
+- Show custom licence terms in irw_info() and flag "Custom" in irw_license_options() (#159)
+- irw_table_sets(): accept several table names, like irw_fetch() (#158)
+- warehouses.md: adding a warehouse is a three-repo change (irw#1733) (#157)
+
+# irw 1.1.3
+
+- Untrack irw.Rcheck/, and fix the ignore rule that was meant to stop it (#152)
+- Add irw_text_2 as the second item-text shard (#151)
+- Make item text a shard list, ahead of the 1000-table cap (#150)
+- Address metadata tables by name; the pinned reference ids are dead (#148)
+- irw_use_version(): read the whole corpus at one IRW version (#146)
+- README: document irw_version() alongside the pinning functions (#145)
+- irw_version(): one number for the whole corpus, and as-of-date lookup (#144)
+
+# irw 1.1.2
+
+- Drop release PRs from the generated NEWS.md entry (#142)
+- Move redivis to Suggests and check for it at runtime (#141)
+
+# irw 1.1.1
+
+- Compare release timestamps in UTC so NEWS.md skips released PRs (#139)
+- Strip the arrow namespace reference from swmd_mokken.rda (#138)
+- Install libcurl headers so redivis builds on Ubuntu (#137)
+- Don't fail release-prepare when Actions can't open the PR (#136)
+
+# irw 1.1.0
+
+## New features
+
+- `irw_imv()` computes the InterModel Vigorish, and `irw_predict()` returns
+  per-response predicted probabilities from a fitted `mirt` model. Together
+  they support out-of-sample model comparison, walked through in the new
+  "Comparing Models Out of Sample with the IMV" article (#131, #130).
+- `irw_set_version()`, `irw_get_version()` and `irw_reset_version()` pin IRW
+  data to a Redivis version, so an analysis can be reproduced against the data
+  it was written for (#128).
+- `irw_collections()`, `irw_collection()` and `irw_collection_members()` expose
+  the curated groupings of IRW tables (#125).
+- `irw_recode()`, `irw_recode_key()` and `irw_decode()` swap long identifiers
+  for keyboard-friendly ones and back again (#123).
+- `irw_table_sets()` summarizes the items and response values in a table with a
+  server-side query, returning in seconds and without spending export quota.
+  Exhausted quota is now reported as a quota error rather than a missing table
+  (#121).
+
+## Changed behavior
+
+- `irw_simdata()` draws default discriminations for `model = "2PL"` and
+  `"3PL"` from lognormal(0, 0.5) rather than lognormal(0.2, 0.2). The old
+  spread put the middle half of items between 0.95 and 1.25, which is a Rasch
+  model in all but name; the new one keeps the median at 1 and widens that
+  range to 0.7-1.4. **Simulated data changes for a fixed seed** when `a` is not
+  supplied — pass `a = rlnorm(n_item, 0.2, 0.2)` for the old behavior (#132).
+
+## Documentation and infrastructure
+
+- New article pairing IRW data with `mirt`, `ltm`, `psychotools` and other
+  psychometrics packages (#124), and a pointer to the IRW project map (#127).
+- Item text table names now resolve case-insensitively (#122).
+- Tag splitting is unified on one parser (#126).
+- Collections table references re-pinned to current Redivis IDs (#129).
+- Releases are cut from the Actions tab: a workflow bumps the version, writes
+  this file and opens a release PR, and merging it tags and publishes
+  (#133, #134).
