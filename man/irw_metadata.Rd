@@ -7,7 +7,7 @@
 irw_metadata(source = "core", sim = FALSE, comp = FALSE, nom = FALSE)
 }
 \arguments{
-\item{source}{Character. Data source: \code{"core"} (default), \code{"nom"}, \code{"sim"}, or \code{"comp"}.}
+\item{source}{Character. The data family: \code{"core"} (default), \code{"nom"}, \code{"sim"}, \code{"comp"}, \code{"conj"} (conjoint experiments; see \code{\link{irw_conj_long}}), or \code{"rank"} (rankings; see \code{\link{irw_rank_compress}}).}
 
 \item{sim}{Deprecated. Use \code{source = "sim"} instead.}
 
@@ -21,4 +21,26 @@ A tibble containing metadata information.
 \description{
 Fetches the metadata table from Redivis and returns it as a tibble.
 Automatically checks for updates and refreshes only when needed.
+}
+\details{
+Each source has its own columns. For \code{source = "conj"} a row is one
+conjoint experiment: \code{n_respondents}, \code{n_rows}, \code{n_tasks},
+\code{n_profiles}, \code{n_attributes}, \code{outcomes},
+\code{n_optout_tasks}, and the design facts \code{country},
+\code{display_language}, \code{label_language}, \code{restrictions}
+(\code{none}, \code{yes}, \code{observed} or \code{unknown}),
+\code{restrictions_note}, \code{task_source} and \code{profile_source}
+(\code{recorded} or \code{inferred} from row order), and the topic tags
+\code{domain} (what the study is about; one or more values joined with
+\code{";"}, primary first) and \code{choice_object} (what one profile
+represents). Both are filters in \code{\link{irw_filter}}, which documents
+their vocabularies.
+
+For \code{source = "rank"} a row is one rankings table: the counts
+\code{n_respondents}, \code{n_rows}, \code{n_tasks}, \code{n_items},
+\code{max_resp} (highest position marked) and \code{n_duplicate_marks},
+and the design record (\code{method}, \code{seats}, \code{n_positions},
+\code{n_candidates}, \code{n_ballots_cast}, \code{n_ballots_with_marks},
+\code{jurisdiction}, \code{date}, \code{office}, ...), whose codes are
+documented in the irw repo's \code{data/rankings/README.md}.
 }

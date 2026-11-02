@@ -13,7 +13,9 @@
     list(user = "datapages", dataset = "item_response_warehouse_3:5xaj"),
     list(user = "datapages", dataset = "item_response_warehouse_4:980f"),
     list(user = "datapages", dataset = "item_response_warehouse_5:3ykx"),
-    list(user = "datapages", dataset = "item_response_warehouse_6:fpe6")
+    list(user = "datapages", dataset = "item_response_warehouse_6:fpe6"),
+    list(user = "datapages", dataset = "item_response_warehouse_7:ej0d"),
+    list(user = "datapages", dataset = "item_response_warehouse_8:8b1m")
   ),
   sim = list(
     list(user = "datapages", dataset = "irw_simsyn:0btg")
@@ -23,6 +25,25 @@
   ),
   nom = list(
     list(user = "datapages", dataset = "irw_nominal:614n")
+  ),
+  ## Conjoint experiments: one row per respondent x task x profile, no item/resp
+  ## (see irw_conj_long()). A shard list, oldest to newest, like $core: irw_conjoint
+  ## is near Redivis' 1000-table cap. Append the next shard here only once it has
+  ## a published release (inst/developer/warehouses.md, "Adding a conjoint shard").
+  conj = list(
+    list(user = "datapages", dataset = "irw_conjoint:5wjx"),
+    list(user = "datapages", dataset = "irw_conjoint_2:142p")
+  ),
+  ## Rankings: one row per respondent x task x marked position, resp a rank
+  ## (see irw_rank_compress()). A shard list, oldest to newest, like $conj: the
+  ## family passed Redivis' 1000-table cap with FairVote's cast vote records
+  ## (irw_rank_2 added 2026-11-01, irw_rank held at ~950). The datasets' display
+  ## names on Redivis are IRW_rank and IRW_rank 2; the reference id is what
+  ## resolves each. Append the next shard here only once it has a published
+  ## release (inst/developer/warehouses.md, "Adding a rankings shard").
+  rank = list(
+    list(user = "datapages", dataset = "irw_rank:93f5"),
+    list(user = "datapages", dataset = "irw_rank_2:byyj")
   )
 )
 
@@ -68,7 +89,8 @@
 .irw_itemtext_specs <- list(
   list(user = "datapages", dataset = "irw_text:07b6"),
   list(user = "datapages", dataset = "irw_text_2:ae47"),
-  list(user = "datapages", dataset = "irw_text_3:9g4m")
+  list(user = "datapages", dataset = "irw_text_3:9g4m"),
+  list(user = "datapages", dataset = "irw_text_4:ez5r")
 )
 
 #' Open the IRW metadata dataset
@@ -145,7 +167,7 @@
 #' @keywords internal
 #' @noRd
 .irw_core_warehouse_fingerprint <- function() {
-  .irw_specs_fingerprint(.irw_datasource_specs$core)
+  .irw_specs_fingerprint(.irw_effective_specs("core"))
 }
 
 #' Fingerprint of configured item text shards (for session cache invalidation)
@@ -153,12 +175,15 @@
 #' @keywords internal
 #' @noRd
 .irw_itemtext_fingerprint <- function() {
-  .irw_specs_fingerprint(.irw_itemtext_specs)
+  .irw_specs_fingerprint(.irw_effective_specs("text"))
 }
 
 #' Session cache key for a non-core datasource
 #'
-#' @param source One of \code{"sim"}, \code{"comp"}, \code{"nom"}.
+#' The cached value is the opened shard list for that source (one dataset for
+#' sim, comp and nom; one or more for conj and rank), in config order.
+#'
+#' @param source Data family, one of \code{"sim"}, \code{"comp"}, \code{"nom"}, \code{"conj"}, \code{"rank"}.
 #' @keywords internal
 #' @noRd
 .irw_single_datasource_cache_key <- function(source) {
@@ -166,5 +191,7 @@
          sim = "sim_datasource",
          comp = "comp_datasource",
          nom = "nom_datasource",
+         conj = "conj_datasource",
+         rank = "rank_datasource",
          stop("Unknown single datasource: ", source, call. = FALSE))
 }

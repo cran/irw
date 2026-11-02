@@ -21,7 +21,7 @@
 #' rights holders, and users are responsible for obtaining any permissions their
 #' intended use requires.
 #'
-#' @examplesIf irw_has_credentials()
+#' @examplesIf irw_has_credentials() || nzchar(Sys.getenv("IRW_RUN_EXAMPLES"))
 #' \donttest{
 #'   irw_list_itemtext_tables()
 #' }
@@ -60,9 +60,11 @@ irw_list_itemtext_tables <- function() {
 #' the instruments themselves. Inclusion of item text here implies no license to
 #' reuse an instrument; copyright and related rights remain with the original
 #' rights holders, and users are responsible for obtaining any permissions their
-#' intended use requires.
+#' intended use requires. The exception is a table whose wording its source
+#' released under an open licence: that licence is printed after the fetch and
+#' is returned by \code{\link{irw_itemtext_licence}}.
 #'
-#' @examplesIf irw_has_credentials()
+#' @examplesIf irw_has_credentials() || nzchar(Sys.getenv("IRW_RUN_EXAMPLES"))
 #' \donttest{
 #'   irw_itemtext("gilbert_meta_49")
 #' }
@@ -77,7 +79,11 @@ irw_itemtext <- function(table_name) {
     )
   }
   if (!identical(getOption("irw.itemtext_disclaimer"), FALSE)) .itemtext_disclaimer()
-  .fetch_itemtext_table(table_name)
+  result <- .fetch_itemtext_table(table_name)
+  # A licensed wording table says so every time it is fetched: the licence
+  # travels with the data, not only with the Redivis page.
+  if (!is.null(result)) .itemtext_licence_message(table_name)
+  result
 }
 
 .itemtext_disclaimer <- function() {

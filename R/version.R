@@ -69,10 +69,21 @@
 #' @keywords internal
 #' @noRd
 .irw_pinnable_specs <- function() {
+  # The effective lists, not the configured ones: a shard found by discovery
+  # has to be pinnable like any other dataset, or `irw_use_version()` would
+  # read it at its current release while every configured shard honoured the
+  # pin -- mixing today's data into a run meant to reproduce an old one. The
+  # manifest is built from the warehouse rather than from this package, so it
+  # already carries rows for shards the installed version has never heard of,
+  # and one that did not exist at the pinned version drops out through
+  # `.irw_absent_version` exactly as a configured shard would.
   specs <- c(
-    unlist(.irw_datasource_specs, recursive = FALSE, use.names = FALSE),
+    unlist(
+      lapply(names(.irw_datasource_specs), .irw_effective_specs),
+      recursive = FALSE, use.names = FALSE
+    ),
     list(.irw_meta_spec),
-    .irw_itemtext_specs
+    .irw_effective_specs("text")
   )
   names(specs) <- vapply(specs, function(s) .irw_dataset_key(s$dataset), character(1))
   specs
@@ -103,12 +114,16 @@
 
 #' Pins that apply to a given data source
 #'
-#' @param source One of \code{"core"}, \code{"nom"}, \code{"sim"}, \code{"comp"}.
+#' The effective list, not the configured one: \code{.irw_pinnable_specs()} pins
+#' discovered shards like any other dataset, so a message built from the
+#' configured list would omit a shard the pin is in force for.
+#'
+#' @param source Data family, one of \code{"core"}, \code{"nom"}, \code{"sim"}, \code{"comp"}.
 #' @return Named character vector of pins for that source's datasets.
 #' @keywords internal
 #' @noRd
 .irw_source_pins <- function(source) {
-  keys <- vapply(.irw_datasource_specs[[source]], function(s) .irw_dataset_key(s$dataset), character(1))
+  keys <- vapply(.irw_effective_specs(source), function(s) .irw_dataset_key(s$dataset), character(1))
   pins <- .irw_pins()
   pins[names(pins) %in% keys]
 }
@@ -212,7 +227,7 @@
 #'
 #' @return Invisibly, the named character vector of all pins in effect.
 #' @seealso \code{\link{irw_get_version}}, \code{\link{irw_reset_version}}
-#' @examplesIf irw_has_credentials()
+#' @examplesIf irw_has_credentials() || nzchar(Sys.getenv("IRW_RUN_EXAMPLES"))
 #' \donttest{
 #' irw_set_version("item_response_warehouse", "v32.0")
 #' irw_set_version("item_response_warehouse_2", "v1.8")
@@ -269,7 +284,7 @@ irw_set_version <- function(dataset, version) {
 #' @return A data frame with columns \code{dataset}, \code{version}, and
 #'   \code{pinned}.
 #' @seealso \code{\link{irw_set_version}}, \code{\link{irw_reset_version}}
-#' @examples
+#' @examplesIf irw_has_credentials() || nzchar(Sys.getenv("IRW_RUN_EXAMPLES"))
 #' irw_get_version()
 #' irw_get_version("item_response_warehouse")
 #' @export

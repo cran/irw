@@ -29,7 +29,7 @@
 #' comma-joined list; no tag value contains a comma (see \code{.irw_split_tags}).
 #'
 #' @param column A character string specifying the tag column name.
-#' @param source Character. Data source: \code{"core"} (default) or \code{"nom"}.
+#' @param source Character. The data family: \code{"core"} (default) or \code{"nom"}.
 #'   \code{"comp"} and \code{"sim"} have no tags by design and error.
 #' @return A data.frame with columns: `tag` and `count`, sorted by descending frequency.
 #' @export
@@ -65,8 +65,8 @@ irw_tag_options <- function(column, source = "core") {
 #'
 #' Returns a data frame showing the number of datasets associated with each license.
 #'
-#' @param source Character. Data source: \code{"core"} (default), \code{"sim"},
-#'   \code{"nom"}, or \code{"comp"}.
+#' @param source Character. The data family: \code{"core"} (default), \code{"sim"},
+#'   \code{"nom"}, \code{"comp"}, \code{"conj"}, or \code{"rank"}.
 #' @param comp Deprecated. Use \code{source = "comp"} instead.
 #' @param sim Deprecated. Use \code{source = "sim"} instead.
 #' @param nom Deprecated. Use \code{source = "nom"} instead.
@@ -139,6 +139,36 @@ irw_license_options <- function(source = "core", comp = FALSE, sim = FALSE, nom 
   paste0("c(", paste(as.character(x), collapse = ", "), ")")
 }
 
+#' A numeric filter's value, checked before anything is fetched
+#'
+#' `irw_filter(n_responses = "abc")` used to compare a numeric column against a
+#' string: R coerces the column to character, compares lexicographically, finds
+#' nothing and reports "0 tables matched" -- a type error wearing the clothes of
+#' a finding about the corpus (review R-22, irw#3221). The Python client raises
+#' `InvalidFilterValue` for the same call, and a type error is the one kind of
+#' answer the two clients must not disagree about.
+#'
+#' Checked at the top of `irw_filter()`, before any metadata is downloaded, so
+#' a mistyped filter costs nothing.
+#' @keywords internal
+#' @noRd
+.irw_check_numeric_filter <- function(name, value) {
+  if (is.null(value)) return(invisible(NULL))
+  if (is.logical(value) || !is.numeric(value)) {
+    stop(sprintf("`%s` must be numeric: a single value, or c(min, max). Got %s.",
+                 name, paste(class(value), collapse = "/")), call. = FALSE)
+  }
+  if (!length(value) %in% c(1L, 2L)) {
+    stop(sprintf("`%s` must be a single value or c(min, max); got %d values.",
+                 name, length(value)), call. = FALSE)
+  }
+  if (anyNA(value)) {
+    stop(sprintf("`%s` cannot be NA; pass NULL to drop the filter.", name),
+         call. = FALSE)
+  }
+  invisible(NULL)
+}
+
 .irw_filter_describe <- function(name, value) {
   if (is.numeric(value) && length(value) == 2L) {
     return(sprintf("%s in [%s, %s]", name, value[1], value[2]))
@@ -157,7 +187,118 @@ irw_license_options <- function(source = "core", comp = FALSE, sim = FALSE, nom 
          core = .fetch_biblio_table(),
          sim = .fetch_simsyn_biblio_table(),
          nom = .fetch_nominal_biblio_table(),
-         comp = .fetch_comps_biblio_table())
+         comp = .fetch_comps_biblio_table(),
+         conj = .fetch_conj_biblio_table(),
+         rank = .fetch_rank_biblio_table())
+}
+
+## Conjoint filters (source = "conj"), over conj_metadata:
+##   n_respondents, n_attributes  numeric ranges, as n_responses;
+##   outcome   "choice" and/or "rating": the table has EVERY type named
+##             (choice_<name>/rating_<name> columns count as their type);
+##   country   ISO 3166 codes: the table was fielded in ANY of them (a pooled
+##             table's "AT;CZ;..." counts for each);
+##   domain    topic tags (data/conjoint/tags.csv in the irw repo, "Topic tags"
+##             in data/conjoint/README.md): the study's setting, one or more
+##             values joined with ";", primary first. A table matches when ANY
+##             requested value is among its tags;
+##   choice_object  what one profile represents (person, policy, ...), one
+##             value per table; ANY of the requested values matches;
+##   license   as for every source, from conj_biblio.
+## The two tag vocabularies are closed sets kept in the irw repo, not here: a
+## requested value that no table carries is an error naming the values that
+## exist, since "0 tables matched" would read as an absence of data.
+.irw_conj_filters <- c("n_respondents", "n_attributes", "outcome", "country",
+                       "domain", "choice_object", "license")
+
+.irw_split_conj_tags <- function(x) {
+  lapply(strsplit(.irw_na_to_empty(x), ";", fixed = TRUE), function(h) tolower(trimws(h)))
+}
+
+## `full` is the unfiltered metadata: the vocabulary check must see every table,
+## not the ones earlier filters left, or a valid value can read as unknown.
+.irw_filter_conj_tag <- function(meta, full, column, value) {
+  if (!is.character(value) || !length(value) || anyNA(value) || !all(nzchar(value))) {
+    stop(sprintf("'%s' must be a character vector of tag values, e.g. ", column),
+         if (column == "domain") "\"immigration_asylum\"." else "\"person\".")
+  }
+  want <- tolower(trimws(value))
+  has <- .irw_split_conj_tags(meta[[column]])
+  known <- sort(unique(unlist(.irw_split_conj_tags(full[[column]]), use.names = FALSE)))
+  known <- known[nzchar(known)]
+  unknown <- setdiff(want, known)
+  if (length(unknown)) {
+    stop(sprintf("Unknown %s value(s): %s. The %s tags in use are: %s.",
+                 column, paste0("\"", unknown, "\"", collapse = ", "), column,
+                 paste(known, collapse = ", ")))
+  }
+  meta[vapply(has, function(h) any(want %in% h), logical(1)), , drop = FALSE]
+}
+
+.irw_na_to_empty <- function(x) {
+  x <- as.character(x)
+  x[is.na(x)] <- ""
+  x
+}
+
+.irw_filter_conj_impl <- function(n_respondents = NULL, n_attributes = NULL,
+                                  outcome = NULL, country = NULL,
+                                  domain = NULL, choice_object = NULL, license = NULL) {
+  meta <- .fetch_conj_metadata_table()
+  need <- c("table", "n_respondents", "n_attributes", "outcomes", "country")
+  if (!all(need %in% names(meta))) {
+    stop("Conjoint metadata table must contain columns: ",
+         paste0("'", need, "'", collapse = ", "), ".")
+  }
+  full <- meta
+  for (column in c("domain", "choice_object")) {
+    value <- get(column)
+    if (is.null(value)) next
+    if (!column %in% names(meta)) {
+      stop(sprintf("The conjoint metadata in this irw_meta release has no '%s' column; ", column),
+           "topic tags were published on 2026-10-13. Call irw_use_version() with a newer release.")
+    }
+    meta <- .irw_filter_conj_tag(meta, full, column, value)
+    if (nrow(meta) == 0L) return(.irw_filter_no_match(column, value))
+  }
+
+  if (!is.null(license)) {
+    bib <- .fetch_conj_biblio_table()
+    keep <- !is.na(bib$Derived_License) & bib$Derived_License %in% license
+    meta <- meta[meta$table %in% bib$table[keep], , drop = FALSE]
+    if (nrow(meta) == 0L) return(.irw_filter_no_match("license", license))
+  }
+
+  if (!is.null(outcome)) {
+    bad <- setdiff(outcome, c("choice", "rating"))
+    if (length(bad)) stop("'outcome' must be \"choice\" and/or \"rating\", not: ",
+                          paste(bad, collapse = ", "), ".")
+    types <- lapply(strsplit(meta$outcomes, ";", fixed = TRUE),
+                    function(o) unique(sub("_.*$", "", o)))
+    meta <- meta[vapply(types, function(t) all(outcome %in% t), logical(1)), , drop = FALSE]
+    if (nrow(meta) == 0L) return(.irw_filter_no_match("outcome", outcome))
+  }
+
+  if (!is.null(country)) {
+    if (!is.character(country)) stop("'country' must be a character vector of ISO 3166 codes, e.g. \"US\".")
+    want <- toupper(country)
+    has <- lapply(strsplit(meta$country, ";", fixed = TRUE), toupper)
+    meta <- meta[vapply(has, function(h) any(want %in% h), logical(1)), , drop = FALSE]
+    if (nrow(meta) == 0L) return(.irw_filter_no_match("country", country))
+  }
+
+  numeric_filters <- list(n_respondents = n_respondents, n_attributes = n_attributes)
+  numeric_filters <- numeric_filters[vapply(numeric_filters, Negate(is.null), logical(1))]
+  for (nm in names(numeric_filters)) {
+    rng <- numeric_filters[[nm]]
+    .irw_check_numeric_filter(nm, rng)
+    if (length(rng) == 1L) rng <- rep(rng, 2)
+    if (length(rng) != 2L) stop(sprintf("'%s' must be length 1 or 2.", nm))
+    meta <- meta[!is.na(meta[[nm]]) & meta[[nm]] >= rng[1] & meta[[nm]] <= rng[2], , drop = FALSE]
+    if (nrow(meta) == 0L) return(.irw_filter_no_match(nm, rng))
+  }
+
+  sort(unique(meta$table))
 }
 
 .irw_filter_comp_impl <- function(n_responses = NULL,
@@ -192,7 +333,7 @@ irw_license_options <- function(source = "core", comp = FALSE, sim = FALSE, nom 
 
   for (nm in names(numeric_filters)) {
     rng <- numeric_filters[[nm]]
-    if (!is.numeric(rng)) stop(sprintf("'%s' must be numeric.", nm))
+    .irw_check_numeric_filter(nm, rng)
     if (length(rng) == 1L) rng <- rep(rng, 2)
     if (length(rng) != 2L) stop(sprintf("'%s' must be length 1 or 2.", nm))
 
@@ -218,6 +359,23 @@ irw_license_options <- function(source = "core", comp = FALSE, sim = FALSE, nom 
 #' - **Variable presence**: e.g., `rt`, `wave`, `cov_`
 #' - **License type**: e.g., `"CC BY 4.0"`, `"CC0 1.0"`
 #'
+#' ## Psychometric Filtering
+#'
+#' Four columns describe how a table behaves rather than how big it is:
+#' `difficulty_spread`, `mean_item_rest_r`, `mean_abs_item_rest_r` and
+#' `prop_items_extreme`. They are classical and model-free -- no IRT model is
+#' fitted anywhere -- so they are defined for every core table, polytomous and
+#' sparse included, and they take no position on what the items measure. They
+#' are computed per item and published per table; the per-item rows behind them
+#' are the `item_classical` table of `irw_meta`.
+#'
+#' Two cautions. Response direction is not harmonised across IRW, so a signed
+#' mean item-rest correlation near zero can mean a reverse-keyed scale rather
+#' than an incoherent one -- compare it with the absolute version. And where a
+#' respondent sees a handful of items out of thousands, rest scores are nearly
+#' disjoint between respondents, so the correlation is a weaker statement about
+#' a sparse bank than about a 20-item questionnaire.
+#'
 #' ## Metadata and Tag-Based Filtering
 #'
 #' To explore available metadata:
@@ -241,8 +399,33 @@ irw_license_options <- function(source = "core", comp = FALSE, sim = FALSE, nom 
 #' @param n_items Numeric vector of length 1 or 2. Filters by number of unique items.
 #' @param responses_per_participant Numeric vector of length 1 or 2. Filters by average responses per participant.
 #' @param responses_per_item Numeric vector of length 1 or 2. Filters by average responses per item.
-#' @param density Numeric vector of length 1 or 2, or `NULL`. Filters by matrix density.
-#'   - Default is `c(0.5, 1)` to exclude sparse matrices.
+#' @param difficulty_spread Numeric vector of length 1 or 2. Filters by the share of
+#'   the table's observed response range that its item means cover -- the range of
+#'   item p-values on a dichotomous table, and normalised by the response range so a
+#'   1-5 Likert table is comparable. Near 0 means every item sits at the same
+#'   difficulty; near 1 means they span the scale. `core` only.
+#' @param mean_item_rest_r Numeric vector of length 1 or 2. Filters by the mean
+#'   item-rest correlation, SIGNED. IRW does not harmonise response direction, so a
+#'   scale with reverse-keyed items averages toward zero here; use
+#'   `mean_abs_item_rest_r` to ask whether the items hang together at all. `core` only.
+#' @param mean_abs_item_rest_r Numeric vector of length 1 or 2. Filters by the mean
+#'   ABSOLUTE item-rest correlation, which is direction-invariant. A wide gap between
+#'   this and `mean_item_rest_r` indicates reverse-keyed items. `core` only.
+#' @param prop_items_extreme Numeric vector of length 1 or 2. Filters by the share of
+#'   items whose mean sits within 5% of either end of the response range, i.e. floor
+#'   or ceiling items. `prop_items_extreme = c(0, 0)` keeps tables with none. `core` only.
+#' @param density Numeric vector of length 1 or 2, or `NULL`. Filters on
+#'   `density`, which is **responses per person-item cell** --
+#'   `n_responses / (n_participants * n_items)` -- and is therefore not bounded
+#'   by 1. A value above 1 means the table measures a person-item pair more than
+#'   once: 768 of 6,720 core tables are above 1 (measured 2026-10-25), 700 of
+#'   them carrying an occasion column (`wave`, `rater`, `trial_*`, `session`,
+#'   ...), and the largest is 3,624.6 for a go/no-go task. It is not the
+#'   proportion of cells that are filled, which is a different quantity IRW does
+#'   not publish (ben-domingue/irw#3222).
+#'   - Default is `c(0.5, Inf)`: a lower bound only, to exclude sparse matrices.
+#'     The default used to cap at 1, which silently dropped every
+#'     repeated-measures table in the corpus.
 #'   - Use `NULL` to disable this filter.
 #'   - The default is skipped for a source whose metadata has no `density` column
 #'     (`"nom"`). Passing `density`, `var`, `longitudinal` or a numeric filter
@@ -272,7 +455,42 @@ irw_license_options <- function(source = "core", comp = FALSE, sim = FALSE, nom 
 #'   See `irw_tag_options("primary_language_s_")`.
 #' @param n_actors Numeric vector of length 1 or 2. Competition-only filter for the
 #'   number of actors. Only used when `source = "comp"`.
-#' @param source Character. Data source: `"core"` (default), `"nom"`, `"sim"`, or `"comp"`.
+#' @param n_respondents Numeric vector of length 1 or 2. Conjoint-only: number of
+#'   respondents. Only used when `source = "conj"`.
+#' @param n_attributes Numeric vector of length 1 or 2. Conjoint-only: number of
+#'   attributes varied on each profile.
+#' @param outcome Character, `"choice"` and/or `"rating"`. Conjoint-only: keep
+#'   tables that have every outcome type named (a table with both matches either).
+#' @param country Character vector of ISO 3166 alpha-2 codes (e.g. `"US"`).
+#'   Conjoint-only: keep tables fielded in any of them; a table pooling several
+#'   countries matches each.
+#' @param domain Character vector. Conjoint-only: what the study is about, its
+#'   setting rather than the attribute it manipulates (a candidate conjoint that
+#'   varies gender is `"candidate_choice"`). A table carries one or more domains,
+#'   primary first; it matches when any value named is among them. The
+#'   vocabulary: `candidate_choice`, `immigration_asylum`,
+#'   `climate_energy_environment`, `international_economy`,
+#'   `democracy_institutions`, `foreign_policy_security`, `health_covid`,
+#'   `tax_welfare_economy`, `consumer_products`, `social_identity_interpersonal`,
+#'   `labour_hiring`, `crime_justice_policing`, `technology_ai_privacy`,
+#'   `political_communication`, `parties_platforms`, `public_administration`,
+#'   `corruption_accountability`, `housing_neighbourhoods`, `other`. A value no
+#'   table carries is an error that lists the values in use.
+#'   `table(irw_metadata(source = "conj")$domain)` gives the counts.
+#' @param choice_object Character vector. Conjoint-only: what one profile
+#'   represents, one value per table: `person` (candidate, applicant, patient,
+#'   neighbour), `policy`, `scenario` (a situation or case), `product_service`,
+#'   `place`, `organisation` or `message` (a text or media artefact judged as
+#'   such). Any value named matches.
+#' @param source Character. The data family: `"core"` (default), `"nom"`, `"sim"`, `"comp"`, `"conj"`, or `"rank"`.
+#'   For `"rank"` the usable filter is `license`; the other criteria name columns
+#'   its metadata does not have and are refused by name. Filter on the design
+#'   facts (method, seats, positions offered, ...) with
+#'   `irw_metadata(source = "rank")` directly.
+#'   For `"conj"` the filters are `n_respondents`, `n_attributes`, `outcome`,
+#'   `country`, `domain`, `choice_object` and `license`; see [irw_metadata()]
+#'   with `source = "conj"` for the other design facts. The two tag columns are
+#'   defined in the irw repo's `data/conjoint/README.md` ("Topic tags").
 #'   Tag filters require `"core"` or `"nom"`.
 #' @param comp Deprecated. Use `source = "comp"` instead.
 #' @param sim Deprecated. Use `source = "sim"` instead.
@@ -288,7 +506,7 @@ irw_license_options <- function(source = "core", comp = FALSE, sim = FALSE, nom 
 #'   Core source only.
 #' @return A sorted character vector of dataset names that match all specified filters, or `character(0)` if no match is found.
 #'
-#' @examplesIf irw_has_credentials()
+#' @examplesIf irw_has_credentials() || nzchar(Sys.getenv("IRW_RUN_EXAMPLES"))
 #' \donttest{
 #' # Numeric filters
 #' irw_filter(n_responses = c(1000, Inf), n_items = c(10, 50))
@@ -316,8 +534,18 @@ irw_license_options <- function(source = "core", comp = FALSE, sim = FALSE, nom 
 #' irw_filter(n_categories = 2, density = NULL)           # binary
 #' irw_filter(n_categories = c(3, 5), density = NULL)     # small multi-category
 #' irw_filter(n_categories = c(10, Inf), density = NULL)  # large category sets
+#' # Filter by psychometric property, not just shape (irw_meta tier-0 columns)
+#' irw_filter(mean_abs_item_rest_r = c(0.4, 1))            # items that hang together
+#' irw_filter(prop_items_extreme = c(0, 0),                # no floor or ceiling items
+#'            difficulty_spread = c(0.3, 1))               # spanning the scale
+#' irw_filter(mean_item_rest_r = c(-1, 0.1),               # signed near zero but
+#'            mean_abs_item_rest_r = c(0.3, 1))            # absolute high: reverse-keyed
 #' irw_filter(source = "sim", n_items = c(10, Inf))
 #' irw_filter(source = "comp", n_actors = c(2, 10))
+#' irw_filter(source = "conj", outcome = "rating", country = c("US", "GB"))
+#' irw_filter(source = "conj", domain = "immigration_asylum")          # the immigration conjoints
+#' irw_filter(source = "conj", domain = c("candidate_choice", "parties_platforms"),
+#'            choice_object = "person")
 #' }
 #' @export
 irw_filter <- function(n_responses = NULL,
@@ -326,7 +554,11 @@ irw_filter <- function(n_responses = NULL,
                        n_items = NULL,
                        responses_per_participant = NULL,
                        responses_per_item = NULL,
-                       density = c(0.5, 1),
+                       difficulty_spread = NULL,
+                       mean_item_rest_r = NULL,
+                       mean_abs_item_rest_r = NULL,
+                       prop_items_extreme = NULL,
+                       density = c(0.5, Inf),
                        var = NULL,
                        age_range = NULL,
                        child_age__for_child_focused_studies_ = NULL,
@@ -338,6 +570,12 @@ irw_filter <- function(n_responses = NULL,
                        primary_language_s_ = NULL,
                        longitudinal = NULL,
                        n_actors = NULL,
+                       n_respondents = NULL,
+                       n_attributes = NULL,
+                       outcome = NULL,
+                       country = NULL,
+                       domain = NULL,
+                       choice_object = NULL,
                        source = "core",
                        comp = FALSE,
                        sim = FALSE,
@@ -347,8 +585,26 @@ irw_filter <- function(n_responses = NULL,
   density_supplied <- !missing(density)
   source <- .irw_resolve_source(source = source, sim = sim, comp = comp, nom = nom)
 
+  # Type-check every numeric filter before a byte is fetched (R-22).
+  for (nm in c("n_responses", "n_categories", "n_participants", "n_items",
+               "responses_per_participant", "responses_per_item",
+               "difficulty_spread", "mean_item_rest_r", "mean_abs_item_rest_r",
+               "prop_items_extreme", "density", "n_actors", "n_respondents",
+               "n_attributes")) {
+    .irw_check_numeric_filter(nm, get(nm))
+  }
+
   if (!is.null(n_actors) && source != "comp") {
     stop("`n_actors` is only available when `source = \"comp\"`.")
+  }
+
+  conj_only <- list(n_respondents = n_respondents, n_attributes = n_attributes,
+                    outcome = outcome, country = country,
+                    domain = domain, choice_object = choice_object)
+  conj_only <- conj_only[vapply(conj_only, Negate(is.null), logical(1))]
+  if (length(conj_only) > 0L && source != "conj") {
+    stop("These filters are only available when `source = \"conj\"`: ",
+         paste(names(conj_only), collapse = ", "), ".")
   }
 
   tag_filters <- list(
@@ -363,6 +619,30 @@ irw_filter <- function(n_responses = NULL,
   )
   tag_filters <- tag_filters[vapply(tag_filters, Negate(is.null), logical(1))]
 
+  if (source == "conj") {
+    other <- list(
+      n_responses = n_responses, n_categories = n_categories, n_participants = n_participants,
+      n_items = n_items, responses_per_participant = responses_per_participant,
+      responses_per_item = responses_per_item,
+      difficulty_spread = difficulty_spread, mean_item_rest_r = mean_item_rest_r,
+      mean_abs_item_rest_r = mean_abs_item_rest_r,
+      prop_items_extreme = prop_items_extreme,
+      density = if (density_supplied) density else NULL, var = var,
+      longitudinal = longitudinal, n_actors = n_actors, collection = collection
+    )
+    other <- c(other, tag_filters)
+    other <- other[vapply(other, Negate(is.null), logical(1))]
+    if (length(other) > 0L) {
+      stop("These filters are not available for `source = \"conj\"`: ",
+           paste(names(other), collapse = ", "), ". Conjoint filters: ",
+           paste(.irw_conj_filters, collapse = ", "), ".")
+    }
+    return(.irw_filter_conj_impl(n_respondents = n_respondents, n_attributes = n_attributes,
+                                 outcome = outcome, country = country,
+                                 domain = domain, choice_object = choice_object,
+                                 license = license))
+  }
+
   if (source == "comp") {
     unsupported_filters <- list(
       n_categories = n_categories,
@@ -370,6 +650,10 @@ irw_filter <- function(n_responses = NULL,
       n_items = n_items,
       responses_per_participant = responses_per_participant,
       responses_per_item = responses_per_item,
+      difficulty_spread = difficulty_spread,
+      mean_item_rest_r = mean_item_rest_r,
+      mean_abs_item_rest_r = mean_abs_item_rest_r,
+      prop_items_extreme = prop_items_extreme,
       density = if (density_supplied) density else NULL,
       var = var,
       age_range = age_range,
@@ -433,6 +717,10 @@ irw_filter <- function(n_responses = NULL,
       n_items = n_items,
       responses_per_participant = responses_per_participant,
       responses_per_item = responses_per_item,
+      difficulty_spread = difficulty_spread,
+      mean_item_rest_r = mean_item_rest_r,
+      mean_abs_item_rest_r = mean_abs_item_rest_r,
+      prop_items_extreme = prop_items_extreme,
       density = if (density_supplied) density else NULL,
       var = var,
       longitudinal = longitudinal
@@ -562,7 +850,16 @@ irw_filter <- function(n_responses = NULL,
     n_participants = n_participants,
     n_items = n_items,
     responses_per_participant = responses_per_participant,
-    responses_per_item = responses_per_item
+    responses_per_item = responses_per_item,
+    ##Tier-0 psychometric columns (ben-domingue/irw#1710). Unlike the structural
+    ##columns above these can legitimately be NA -- a table whose responses are
+    ##all one value has no difficulty spread to report, and a single-item table
+    ##has no rest score -- which is why the subset below guards on is.na(). An
+    ##unguarded `metadata[NA, ]` does not drop those rows, it invents all-NA ones.
+    difficulty_spread = difficulty_spread,
+    mean_item_rest_r = mean_item_rest_r,
+    mean_abs_item_rest_r = mean_abs_item_rest_r,
+    prop_items_extreme = prop_items_extreme
   )
   
   numeric_filters <- numeric_filters[vapply(numeric_filters, Negate(is.null), logical(1))]
@@ -570,7 +867,16 @@ irw_filter <- function(n_responses = NULL,
   for (filter_name in names(numeric_filters)) {
     filter_value <- numeric_filters[[filter_name]]
     if (length(filter_value) == 1) filter_value <- rep(filter_value, 2)
-    metadata <- metadata[metadata[[filter_name]] >= filter_value[1] &
+    if (!filter_name %in% names(metadata)) {
+      ##A released client reading an irw_meta version from before the column
+      ##existed. Say so rather than returning every table as if unfiltered.
+      stop(sprintf(paste0("`%s` is not a column of the published metadata. It ",
+                          "arrived with irw_meta's tier-0 columns; update the ",
+                          "package or drop this filter."), filter_name),
+           call. = FALSE)
+    }
+    metadata <- metadata[!is.na(metadata[[filter_name]]) &
+                           metadata[[filter_name]] >= filter_value[1] &
                            metadata[[filter_name]] <= filter_value[2], ]
     if (nrow(metadata) == 0L) {
       return(.irw_filter_no_match(filter_name, filter_value))
@@ -588,10 +894,10 @@ irw_filter <- function(n_responses = NULL,
     num_removed_by_density <- nrow(metadata_before_density) - nrow(metadata)
 
     if (!user_specified_density &&
-        identical(density, c(0.5, 1)) &&
+        identical(density, c(0.5, Inf)) &&
         num_removed_by_density > 0) {
       message(sprintf(
-        "Note: Default density filter (0.5-1) removed %d dataset(s). Set density = NULL to disable.",
+        "Note: Default density filter (>= 0.5 responses per person-item cell) removed %d dataset(s). Set density = NULL to disable.",
         num_removed_by_density
       ))
     }

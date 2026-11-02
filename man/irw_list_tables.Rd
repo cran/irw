@@ -7,7 +7,7 @@
 irw_list_tables(source = "core", sim = FALSE, comp = FALSE, nom = FALSE)
 }
 \arguments{
-\item{source}{Character. Data source: \code{"core"} (default), \code{"nom"}, \code{"sim"}, or \code{"comp"}.}
+\item{source}{Character. The data family: \code{"core"} (default), \code{"nom"}, \code{"sim"}, \code{"comp"}, \code{"conj"} (conjoint experiments; see \code{\link{irw_conj_long}}), or \code{"rank"} (rankings; see \code{\link{irw_rank_compress}}).}
 
 \item{sim}{Deprecated. Use \code{source = "sim"} instead.}
 
@@ -26,7 +26,7 @@ Retrieves a summary of available tables in the IRW database, including their nam
 number of rows, and variable count, sorted alphabetically by table name.
 }
 \examples{
-\dontshow{if (irw_has_credentials()) withAutoprint(\{ # examplesIf}
+\dontshow{if (irw_has_credentials() || nzchar(Sys.getenv("IRW_RUN_EXAMPLES"))) withAutoprint(\{ # examplesIf}
 \donttest{
 irw_list_tables()               # Main IRW database
 irw_list_tables(source = "sim")   # Simulation dataset

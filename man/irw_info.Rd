@@ -19,7 +19,7 @@ irw_info(
 \item{details}{Logical. When \code{TRUE} and \code{table_name} is \code{NULL}, also
 prints a breakdown by dataset. Defaults to \code{FALSE}.}
 
-\item{source}{Character. Data source: \code{"core"} (default), \code{"nom"}, \code{"sim"}, or \code{"comp"}.}
+\item{source}{Character. The data family: \code{"core"} (default), \code{"nom"}, \code{"sim"}, \code{"comp"}, \code{"conj"} (conjoint experiments; see \code{\link{irw_conj_long}}), or \code{"rank"} (rankings; see \code{\link{irw_rank_compress}}).}
 
 \item{comp}{Deprecated. Use \code{source = "comp"} instead.}
 
@@ -39,7 +39,7 @@ Use \code{details = TRUE} to also print a per-dataset breakdown (main IRW only).
 If a table name is provided, shows details for that table.
 }
 \examples{
-\dontshow{if (irw_has_credentials()) withAutoprint(\{ # examplesIf}
+\dontshow{if (irw_has_credentials() || nzchar(Sys.getenv("IRW_RUN_EXAMPLES"))) withAutoprint(\{ # examplesIf}
 \donttest{
 irw_info()                 # Combined totals
 irw_info(details = TRUE)   # Combined + per-dataset breakdown

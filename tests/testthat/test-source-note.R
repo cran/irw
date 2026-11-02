@@ -90,8 +90,9 @@ test_that("a failed lookup is silent, and cached so the next session does not pa
   calls <- 0
   local_mocked_bindings(
     # Pass the redivis guard (client installed, login available) so the
-    # failure comes from the dataset itself, as on a real failed lookup.
-    .irw_require_redivis = function() invisible(TRUE),
+    # failure comes from the dataset itself, as on a real failed lookup. The
+    # note's lookup is a query, so the gate it passes is the query one.
+    .irw_require_redivis_query = function() invisible(TRUE),
     .irw_open_meta_dataset = function() {
       calls <<- calls + 1
       stop("no Source_via column in this release")
@@ -120,6 +121,50 @@ test_that("the lookup is kept on disk for a week, then refreshed", {
   new_session()
   notes(.irw_source_note("bailon_2020_covidaffect"))
   expect_equal(calls, 2)
+})
+
+test_that("the literal string \"NA\" is not a source", {
+  # biblio writes an absent Source_via as "NA", not SQL NULL, so the query's
+  # filter has to name it -- otherwise every table prints "found via NA".
+  fresh_session()
+  with_nas <- function() {
+    data.frame(
+      table = c("bailon_2020_covidaffect", "environment_ltm", "pks_probability"),
+      via = c("openESM", "NA", "  na  "),
+      url = c("https://zenodo.org/records/22763396", "", ""),
+      stringsAsFactors = FALSE
+    )
+  }
+  local_mocked_bindings(.irw_source_note_query = function() with_nas())
+  expect_length(notes(.irw_source_note("environment_ltm")), 0)
+  expect_length(notes(.irw_source_note("pks_probability")), 0)
+  n <- notes(.irw_source_note("bailon_2020_covidaffect"))
+  expect_length(n, 1)
+  expect_match(n, "openESM")
+})
+
+test_that("a cache written before the NA fix heals on read", {
+  fresh_session()
+  path <- .irw_source_note_path()
+  dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
+  writeLines(c("table,via,url",
+               "environment_ltm,NA,",
+               "bailon_2020_covidaffect,openESM,"), path, useBytes = TRUE)
+  local_mocked_bindings(.irw_source_note_query = function() stop("should read the file"))
+  expect_length(notes(.irw_source_note("environment_ltm")), 0)
+  expect_length(notes(.irw_source_note("bailon_2020_covidaffect")), 1)
+})
+
+test_that("the query's exclusion is built from the same vector as the filter", {
+  # Not a pinned string: the SQL is generated from .irw_not_a_source, so the
+  # clause and the R-side filter cannot drift apart. Keep the vector in step
+  # with the Python twin's _NOT_A_SOURCE.
+  clause <- .irw_source_note_sql_exclusion()
+  expect_match(clause, "LOWER(TRIM(Source_via)) NOT IN", fixed = TRUE)
+  for (value in setdiff(.irw_not_a_source, "")) {
+    expect_match(clause, sprintf("'%s'", value), fixed = TRUE)
+  }
+  expect_false(grepl("''", clause, fixed = TRUE))
 })
 
 test_that("the cache file is the one the Python package writes", {

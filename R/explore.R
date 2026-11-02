@@ -6,12 +6,12 @@
 #' @param sim Deprecated. Use \code{source = "sim"} instead.
 #' @param comp Deprecated. Use \code{source = "comp"} instead.
 #' @param nom Deprecated. Use \code{source = "nom"} instead.
-#' @param source Character. Data source: \code{"core"} (default), \code{"nom"}, \code{"sim"}, or \code{"comp"}.
+#' @param source Character. The data family: \code{"core"} (default), \code{"nom"}, \code{"sim"}, \code{"comp"}, \code{"conj"} (conjoint experiments; see \code{\link{irw_conj_long}}), or \code{"rank"} (rankings; see \code{\link{irw_rank_compress}}).
 #' @return A data frame with the following columns:
 #'   \item{name}{The name of the table, sorted alphabetically.}
 #'   \item{numRows}{The number of rows in the table.}
 #'   \item{variableCount}{The number of variables in the table.}
-#' @examplesIf irw_has_credentials()
+#' @examplesIf irw_has_credentials() || nzchar(Sys.getenv("IRW_RUN_EXAMPLES"))
 #' \donttest{
 #' irw_list_tables()               # Main IRW database
 #' irw_list_tables(source = "sim")   # Simulation dataset
@@ -33,6 +33,7 @@ irw_list_tables <- function(source = "core", sim = FALSE, comp = FALSE, nom = FA
   })
   
   tables_info <- do.call(rbind, tables_info_list)
+  .irw_warn_shard_duplicates(tables_info, source)
   tables_info <- .irw_dedup_table_info(tables_info)
   tables_info <- tables_info[order(tables_info$name), ]
   rownames(tables_info) <- NULL
@@ -52,13 +53,13 @@ irw_list_tables <- function(source = "core", sim = FALSE, comp = FALSE, nom = FA
 #' @param table_name Optional. Table name to describe; if \code{NULL}, prints database‑level info.
 #' @param details Logical. When \code{TRUE} and \code{table_name} is \code{NULL}, also
 #'   prints a breakdown by dataset. Defaults to \code{FALSE}.
-#' @param source Character. Data source: \code{"core"} (default), \code{"nom"}, \code{"sim"}, or \code{"comp"}.
+#' @param source Character. The data family: \code{"core"} (default), \code{"nom"}, \code{"sim"}, \code{"comp"}, \code{"conj"} (conjoint experiments; see \code{\link{irw_conj_long}}), or \code{"rank"} (rankings; see \code{\link{irw_rank_compress}}).
 #' @param comp Deprecated. Use \code{source = "comp"} instead.
 #' @param sim Deprecated. Use \code{source = "sim"} instead.
 #' @param nom Deprecated. Use \code{source = "nom"} instead.
 #'
 #' @return Invisibly returns \code{NULL}.
-#' @examplesIf irw_has_credentials()
+#' @examplesIf irw_has_credentials() || nzchar(Sys.getenv("IRW_RUN_EXAMPLES"))
 #' \donttest{
 #' irw_info()                 # Combined totals
 #' irw_info(details = TRUE)   # Combined + per-dataset breakdown
@@ -85,6 +86,10 @@ irw_info <- function(table_name = NULL, details = FALSE, source = "core", comp =
     "IRW Competition Database Information"
   } else if (source == "nom") {
     "IRW Nominal Database Information"
+  } else if (source == "conj") {
+    "IRW Conjoint Database Information"
+  } else if (source == "rank") {
+    "IRW Rankings Database Information"
   } else {
     "IRW Database Information (Combined)"
   }
@@ -183,7 +188,7 @@ irw_info <- function(table_name = NULL, details = FALSE, source = "core", comp =
       }, error = function(e) "None")
     }
 
-    # Biblio: main + comp only (sim has none)
+    # Biblio: every source has its own (core, comp, sim, nom, conj, rank)
     description <- NA
     doi <- NA
     url_data <- NA
@@ -198,6 +203,10 @@ irw_info <- function(table_name = NULL, details = FALSE, source = "core", comp =
       .fetch_simsyn_biblio_table()
     } else if (source == "nom") {
       .fetch_nominal_biblio_table()
+    } else if (source == "conj") {
+      .fetch_conj_biblio_table()
+    } else if (source == "rank") {
+      .fetch_rank_biblio_table()
     } else {
       .fetch_biblio_table()
     }
@@ -221,7 +230,7 @@ irw_info <- function(table_name = NULL, details = FALSE, source = "core", comp =
     
     message(strrep("-", 50))
     message("Table Information for: ", table_name,
-            if (source == "sim") " (simulation)" else if (source == "comp") " (competition)" else if (source == "nom") " (nominal)" else "")
+            if (source == "sim") " (simulation)" else if (source == "comp") " (competition)" else if (source == "nom") " (nominal)" else if (source == "conj") " (conjoint)" else if (source == "rank") " (rankings)" else "")
     message(strrep("-", 50))
     message(strrep("-", 50))
     message(sprintf("%-25s %s", "Description:", description))

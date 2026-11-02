@@ -4,12 +4,16 @@
 #' the Redivis export quota, unlike \code{table$to_tibble()}, which materialises
 #' every row of the table.
 #'
+#' Unlike reading a table, a query needs a Redivis login: this is the one
+#' warehouse path that \code{.irw_require_redivis_query()} gates, and the only
+#' place in the package where a missing login can start a browser flow.
+#'
 #' @param sql A single SQL string.
 #' @return A tibble with the query result.
 #' @keywords internal
 #' @noRd
 .irw_query_tibble <- function(sql) {
-  .irw_require_redivis()
+  .irw_require_redivis_query()
   tryCatch(
     suppressWarnings(redivis::redivis$query(sql)$to_tibble()),
     error = function(e) {
@@ -47,7 +51,7 @@
 #' @param name Character vector of one or more IRW table names. Several names
 #'   run the same queries once per table, still without an export, so this is
 #'   the way to sweep many tables.
-#' @param source Character. Data source: \code{"core"} (default), \code{"nom"},
+#' @param source Character. The data family: \code{"core"} (default), \code{"nom"},
 #'   \code{"sim"}, or \code{"comp"}.
 #' @param per_item Logical. If TRUE, also return a per-item summary (row count,
 #'   response minimum, maximum, and number of distinct response values). One
@@ -87,6 +91,10 @@ irw_table_sets <- function(name, source = "core", per_item = FALSE) {
     stop("`name` must be one or more table names.", call. = FALSE)
   }
   source <- .irw_resolve_source(source = source)
+  if (source == "conj") {
+    stop("irw_table_sets() needs item/resp columns, which a conjoint table does not have. ",
+         "Convert it first with irw_conj_long().", call. = FALSE)
+  }
 
   if (length(name) == 1L) {
     return(.irw_table_sets_one(name, source = source, per_item = per_item))

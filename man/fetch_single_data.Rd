@@ -8,6 +8,8 @@ fetch_single_data(
   table_id,
   source = "core",
   dedup = FALSE,
+  max_rows = NULL,
+  columns = NULL,
   sim = FALSE,
   comp = FALSE,
   nom = FALSE
@@ -16,9 +18,13 @@ fetch_single_data(
 \arguments{
 \item{table_id}{Character. Name of the table.}
 
-\item{source}{Character. One of \code{"core"}, \code{"nom"}, \code{"sim"}, \code{"comp"}.}
+\item{source}{Character. The data family, one of \code{"core"}, \code{"nom"}, \code{"sim"}, \code{"comp"}.}
 
 \item{dedup}{Logical. If TRUE, apply deduplication logic to responses.}
+
+\item{max_rows}{Integer or NULL. Stop after this many rows, pushed to Redivis.}
+
+\item{columns}{Character vector or NULL. Fetch only these columns, pushed to Redivis.}
 
 \item{sim}{Deprecated. Use \code{source = "sim"} instead.}
 

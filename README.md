@@ -9,21 +9,46 @@ what, where the data lives, and which document is authoritative when two disagre
 
 ## Installation
 
-``` r
-# Install the development version of irw from GitHub
-# install.packages("pak")  # if you don't already have pak
-pak::pak("itemresponsewarehouse/Rpkg")
+`irw` is on [CRAN](https://cran.R-project.org/package=irw):
 
-# Load the package
+``` r
+install.packages("irw")
 library(irw)
 ```
 
 Downloading tables also needs [redivis](https://github.com/redivis/redivis-r),
-the client for the warehouse itself. It is not on CRAN and `pak` does not install
-it for you; get it from r-universe:
+the client for the warehouse itself. It is not on CRAN and is not installed for
+you; get it from r-universe:
 
 ``` r
-install.packages("redivis", repos = c("https://redivis.r-universe.dev", getOption("repos")))
+install.packages("redivis", repos = c("https://redivis.r-universe.dev", "https://cloud.r-project.org"))
+```
+
+This README documents 1.4.0, which has been submitted to CRAN. **Until it is
+accepted, `install.packages("irw")` installs 1.3.1**, which was tagged before
+several features landed and so lacks:
+
+-   the conjoint source --- `irw_fetch(source = "conj")`, `irw_conj_long()`,
+    and the conjoint filters, metadata and citations
+-   the rankings source --- `irw_fetch(source = "rank")` and
+    `irw_rank_compress()`
+-   `irw_itemtext_licence()`, the licence on a table's item wording
+-   the seventh and eighth core warehouse shards. 1.3.1's shard list stops at
+    the sixth, and a shard it does not know about is dropped from
+    `irw_list_tables()`, `irw_metadata()` and `irw_filter()` with no warning,
+    so **1.3.1's table counts are short by 1,455 tables, 20.4% of the
+    core corpus** (counted 2026-11-02) -- and new core tables are published
+    into the newest shard, so
+    the gap grows. 1.4.0 also reads the warehouse catalog each session, so a
+    shard published after a release can no longer go missing this way.
+-   reading the warehouse without a Redivis login (see below). Outside an
+    interactive session 1.3.1 stops when no login is cached.
+
+Install from GitHub for those, or to follow `main` between releases:
+
+``` r
+# install.packages("pak")  # if you don't already have pak
+pak::pak("itemresponsewarehouse/Rpkg")
 ```
 
 The functions that do not touch the warehouse --- `irw_simdata()`,
@@ -31,15 +56,33 @@ The functions that do not touch the warehouse --- `irw_simdata()`,
 `irw_long2resp()`, `irw_resp2long()`, `irw_check_resp()` and `irw_covariates()`
 --- work without it.
 
-## IMPORTANT: Redivis Authentication
+## Redivis Authentication
 
-The IRW tables are hosted on [Redivis](https://redivis.com), a data management platform. To access these datasets, you'll need to:
+The IRW tables are hosted on [Redivis](https://redivis.com), a data management
+platform. The warehouse is public, so **reading it from R needs no Redivis
+account**: `irw_info()`, `irw_list_tables()`, `irw_filter()`, `irw_fetch()`,
+`irw_itemtext()` and the metadata functions all work with no login, as long as
+the `redivis` client is version 0.12.14 or later (earlier versions
+authenticated every request). Two things still need an account:
+
+- `irw_table_sets()`, which runs a server-side SQL query rather than reading a
+  table. Redivis requires a login for queries.
+- Everything, on a `redivis` client older than 0.12.14. Outside an interactive
+  session `irw` then stops with instructions instead of opening a browser; the
+  message names the upgrade.
+
+This is the R package only. The Python package and the IRW MCP server always
+send a Redivis token, so they still require an account.
+
+`irw_has_credentials()` reports whether a login is available.
+
+To sign in:
 
 1.  Have a Redivis account (create one at <https://redivis.com/?createAccount> if you don't have one).
 
 2.  Authenticate using the Redivis R Client:
 
-    1.  When you first use a function in `irw` that connects to Redivis (e.g. `irw_info()`), a browser window will open, prompting you to sign in to your Redivis account.
+    1.  When you first use a function in `irw` that needs a login (e.g. `irw_table_sets()`), a browser window will open, prompting you to sign in to your Redivis account.
 
     2.  After signing in, click **Allow** to grant access for the Redivis R Client.
 
@@ -47,7 +90,7 @@ The IRW tables are hosted on [Redivis](https://redivis.com), a data management p
 
 **Note:** You only need to authenticate once per session. For detailed instructions, refer to the [Redivis R Client documentation](https://apidocs.redivis.com/client-libraries/redivis-r/getting-started).
 
-In a script, a scheduled job or another non-interactive session, `irw` does not open a browser. If no login is cached it stops and asks you to sign in once from an interactive R session (the login is then reused) or to set the `REDIVIS_API_TOKEN` environment variable. `irw_has_credentials()` reports whether a login is available.
+In a script, a scheduled job or another non-interactive session, `irw` does not open a browser. When a call does need a login and none is cached, it stops and asks you to sign in once from an interactive R session (the login is then reused) or to set the `REDIVIS_API_TOKEN` environment variable.
 
 ## Usage Examples
 

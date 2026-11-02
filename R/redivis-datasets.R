@@ -42,12 +42,41 @@
 #' @return The result of \code{expr()}.
 #' @keywords internal
 #' @noRd
+# `redivis` warns on every unpinned read that you should pass a qualified
+# reference id -- "No reference id was provided for the dataset, which may cause
+# your code to break if the name changes. Consider using the qualified reference
+# ...". That advice is correct in general and WRONG for this package, which must
+# never pin one: a reference id identifies one VERSION's table, and a release cut
+# rotates them. The v20.0 cut on 2026-09-04 minted new ids for all thirteen
+# irw_meta tables at once (`tags` 7nkh->q2w9), which is what broke the pinned
+# ids in irw_site; Python-pkg suppresses the same warning in its __init__ and
+# `config.py` says in as many words that they must not be pinned.
+#
+# So it is advice the user cannot act on, printed once per dataset and once per
+# table. A single irw_filter() call across eight core shards emits it dozens of
+# times, which trains people to ignore warnings from this package -- including
+# the ones that matter, like the shard-list and duplicate-name warnings next to
+# it. Only this exact message is muffled; every other redivis warning passes
+# through untouched.
+.irw_redivis_advice_pattern <- "No reference id was provided for the (table|dataset)"
+
+.irw_muffle_redivis_advice <- function(expr) {
+  withCallingHandlers(
+    expr(),
+    warning = function(w) {
+      if (grepl(.irw_redivis_advice_pattern, conditionMessage(w))) {
+        invokeRestart("muffleWarning")
+      }
+    }
+  )
+}
+
 .retry_with_backoff <- function(expr, attempts = 3L, base_delay = 1) {
   if (!is.function(expr)) {
     stop("`.retry_with_backoff()` now expects a function argument, e.g. `.retry_with_backoff(function() expr)`")
   }
   for (i in seq_len(attempts)) {
-    result <- tryCatch(expr(), error = function(e) e)
+    result <- tryCatch(.irw_muffle_redivis_advice(expr), error = function(e) e)
     if (!inherits(result, "error")) {
       return(result)
     }
@@ -63,11 +92,11 @@
 
 
 # helper for multiple redivis datasets
-.irw_sources <- c("core", "nom", "sim", "comp")
+.irw_sources <- c("core", "nom", "sim", "comp", "conj", "rank")
 
 #' Resolve data source from \code{source} or deprecated \code{nom}/\code{sim}/\code{comp}
 #'
-#' @param source Character. One of \code{"core"}, \code{"nom"}, \code{"sim"}, \code{"comp"}.
+#' @param source Character. The data family, one of \code{"core"}, \code{"nom"}, \code{"sim"}, \code{"comp"}, \code{"conj"}.
 #' @param sim Deprecated. Use \code{source = "sim"} instead.
 #' @param comp Deprecated. Use \code{source = "comp"} instead.
 #' @param nom Deprecated. Use \code{source = "nom"} instead.
@@ -102,8 +131,7 @@
     "tags_tibble",
     "tags_version",
     "nominal_tags_tibble",
-    "nominal_tags_version",
-    "core_live_catalog_fingerprint"
+    "nominal_tags_version"
   )) {
     if (exists(nm, envir = .irw_env)) {
       rm(list = nm, envir = .irw_env)
@@ -124,35 +152,21 @@
   }
 }
 
-#' Fingerprint of core warehouse config plus each warehouse version tag
+#' Order opened datasources for search
 #'
-#' Used so metadata filtered to live tables refreshes when a warehouse updates
-#' even if \code{irw_meta} has not changed.
+#' Every spec list in the config is declared oldest-to-newest, and a table that
+#' exists in more than one shard must resolve to its most recent copy, so any
+#' list with more than one shard is searched newest-first. A single-dataset
+#' source is returned as is. This holds for the core warehouses, the item text
+#' shards and, since the conjoint source became a shard list, for conj.
 #'
-#' @keywords internal
-#' @noRd
-.irw_core_live_catalog_fingerprint <- function() {
-  ds_list <- .initialize_datasource(source = "core")
-  tags <- vapply(ds_list, function(ds) {
-    ds$get()
-    tag <- ds$properties$version$tag
-    if (is.null(tag) || length(tag) == 0L) "" else as.character(tag[[1]])
-  }, character(1))
-  paste(.irw_core_warehouse_fingerprint(), paste(tags, collapse = ","), sep = "|")
-}
-
-#' Return datasources in preferred search order (newest shard first)
-#'
-#' Both sharded families -- core warehouses and item text -- resolve
-#' newest-first, so a name present in more than one shard resolves to its most
-#' recent copy. The single-dataset sources have nothing to order.
-#'
-#' @param ds_list List of Redivis dataset objects.
-#' @param source Resolved source name, or \code{"text"} for item text.
+#' @param ds_list List of Redivis dataset objects, in config order.
+#' @param source Resolved source name, or \code{"text"} for item text. Kept so
+#'   callers read naturally; the ordering rule no longer depends on it.
 #' @keywords internal
 #' @noRd
 .irw_order_datasources <- function(ds_list, source) {
-  if (source %in% c("core", "text") && length(ds_list) > 1L) {
+  if (length(ds_list) > 1L) {
     rev(ds_list)
   } else {
     ds_list
@@ -253,7 +267,7 @@
 #' @keywords internal
 #' @noRd
 .irw_open_core_datasources <- function() {
-  .irw_open_datasources(.irw_datasource_specs$core, noun = "warehouse")
+  .irw_open_datasources(.irw_effective_specs("core"), noun = "warehouse")
 }
 
 #' Initialize Redivis Datasource(s)
@@ -262,9 +276,14 @@
 #' - If \code{source = "sim"}, returns the IRW simulation dataset (\code{irw_simsyn:0btg})
 #' - If \code{source = "comp"}, returns the IRW competition dataset (\code{irw_competitions:cmd7})
 #' - If \code{source = "nom"}, returns the IRW nominal dataset (\code{irw_nominal:614n})
+#' - If \code{source = "conj"}, returns every conjoint shard (\code{irw_conjoint}, ...)
+#' - If \code{source = "rank"}, returns every rankings shard (\code{irw_rank}, ...)
 #' - If \code{source = "core"} (default), returns all main IRW production datasets
 #'
-#' @param source Character. One of \code{"core"}, \code{"nom"}, \code{"sim"}, \code{"comp"}.
+#' The list is in config order (oldest first); callers pass it through
+#' \code{.irw_order_datasources()} before searching.
+#'
+#' @param source Character. The data family, one of \code{"core"}, \code{"nom"}, \code{"sim"}, \code{"comp"}, \code{"conj"}.
 #'   Default is \code{"core"}.
 #' @param sim Deprecated. Use \code{source = "sim"} instead.
 #' @param comp Deprecated. Use \code{source = "comp"} instead.
@@ -284,16 +303,66 @@
     return(.irw_env$datasource_list)
   }
 
+  # Every non-core source is a spec list too. sim, comp and nom have one entry;
+  # conj and rank have one per shard. Opening them all through .irw_open_datasources()
+  # gives a shard list the same semantics as core: an unreleased shard is
+  # skipped with a warning instead of failing every lookup. The list is
+  # re-opened when the configured specs change (package upgrade, load_all()).
+  specs <- .irw_effective_specs(source)
   cache_key <- .irw_single_datasource_cache_key(source)
-  if (!exists(cache_key, envir = .irw_env) || is.null(.irw_env[[cache_key]])) {
-    .irw_env[[cache_key]] <- .irw_open_dataset(.irw_datasource_specs[[source]][[1L]])
+  fp_key <- paste0(cache_key, "_fingerprint")
+  fp <- .irw_specs_fingerprint(specs)
+  if (!exists(cache_key, envir = .irw_env) || is.null(.irw_env[[cache_key]]) ||
+      !identical(.irw_env[[fp_key]], fp)) {
+    .irw_env[[cache_key]] <- .irw_open_datasources(specs, noun = .irw_source_noun(source))
+    .irw_env[[fp_key]] <- fp
   }
-  list(.irw_env[[cache_key]])
+  .irw_env[[cache_key]]
+}
+
+#' What one dataset of a source is called, for messages
+#'
+#' @keywords internal
+#' @noRd
+.irw_source_noun <- function(source) {
+  switch(source,
+         core = "warehouse",
+         conj = "conjoint shard",
+         rank = "rankings shard",
+         paste(source, "dataset"))
+}
+
+#' Warn when a table name is published in more than one shard of a source
+#'
+#' Core resolves such a name to its newest copy silently (ARCHITECTURE.md
+#' section 2, and the daily drift report watches for it). For the other shard
+#' lists -- conj and rank today -- a duplicate is an upload mistake that must not be
+#' merged away without a word, so \code{irw_list_tables()} says which names
+#' it saw twice before keeping the newest copy.
+#'
+#' @param tables_info Data frame with a \code{name} column, before dedup.
+#' @param source Resolved source name.
+#' @keywords internal
+#' @noRd
+.irw_warn_shard_duplicates <- function(tables_info, source) {
+  if (source == "core" || !"name" %in% names(tables_info)) {
+    return(invisible(NULL))
+  }
+  dup <- unique(tables_info$name[duplicated(tables_info$name)])
+  if (length(dup) > 0L) {
+    warning(
+      length(dup), " table name(s) appear in more than one ", source, " shard: ",
+      paste(dup, collapse = ", "), ". Only the newest copy is listed and read; ",
+      "please report this at https://github.com/ben-domingue/irw/issues.",
+      call. = FALSE
+    )
+  }
+  invisible(NULL)
 }
 
 #' Table names currently listed in Redivis for a source
 #'
-#' @param source Character. One of \code{"core"}, \code{"nom"}, \code{"sim"}, \code{"comp"}.
+#' @param source Character. The data family, one of \code{"core"}, \code{"nom"}, \code{"sim"}, \code{"comp"}.
 #' @return Lowercase character vector of unique table names.
 #' @keywords internal
 #' @noRd

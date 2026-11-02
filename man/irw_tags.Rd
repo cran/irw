@@ -9,7 +9,7 @@ irw_tags(tables = NULL, source = "core")
 \arguments{
 \item{tables}{Optional. A character vector of table name(s) to filter by.}
 
-\item{source}{Character. Data source: \code{"core"} (default) or \code{"nom"}.
+\item{source}{Character. The data family: \code{"core"} (default) or \code{"nom"}.
 \code{"comp"} and \code{"sim"} have no tags by design and error.}
 }
 \value{
@@ -21,7 +21,7 @@ Link to Redivis table: https://redivis.com/datasets/bdxt-4fqe5tyf4/tables/7nkh-6
 Automatically checks for updates and refreshes only when needed.
 }
 \examples{
-\dontshow{if (irw_has_credentials()) withAutoprint(\{ # examplesIf}
+\dontshow{if (irw_has_credentials() || nzchar(Sys.getenv("IRW_RUN_EXAMPLES"))) withAutoprint(\{ # examplesIf}
 \donttest{
 irw_tags()                  # core
 irw_tags(source = "nom")    # nominal
